@@ -17,6 +17,7 @@ from vcut_studio.exporting import (
     build_stretched_dub_cues,
     build_subtitle_cues,
     build_subtitle_cues_from_dub_cues,
+    bilingual_subtitle_filter_expression,
     can_reuse_segment_dub,
     export_clean_video,
     export_english_dub_video,
@@ -198,7 +199,43 @@ class ExportPlanningTests(unittest.TestCase):
 
         self.assertEqual(
             expression,
-            f"subtitles='{ffmpeg_filter_path('demo subtitles.srt')}':force_style='FontSize=40'",
+            (
+                f"subtitles='{ffmpeg_filter_path('demo subtitles.srt')}':"
+                "force_style='FontSize=40,Alignment=2,PrimaryColour=&H00FFFFFF,"
+                "Outline=0,Shadow=0,BorderStyle=1,OutlineColour=&H00000000,BackColour=&H00000000'"
+            ),
+        )
+
+    def test_subtitle_filter_expression_accepts_color_without_hash(self) -> None:
+        settings = AppSettings()
+        settings.export.subtitle_english_color = "047bff"
+
+        expression = subtitle_filter_expression(settings, "demo subtitles.srt")
+
+        self.assertIn("PrimaryColour=&H00FF7B04", expression)
+
+    def test_bilingual_subtitle_filter_expression_uses_separate_colors(self) -> None:
+        settings = AppSettings()
+        settings.export.subtitle_font_size = 30
+        settings.export.subtitle_chinese_color = "#FF0000"
+        settings.export.subtitle_english_color = "#00FF00"
+
+        expression = bilingual_subtitle_filter_expression(
+            settings,
+            "chinese.srt",
+            "english.srt",
+        )
+
+        self.assertEqual(
+            expression,
+            (
+                f"subtitles='{ffmpeg_filter_path('chinese.srt')}':"
+                "force_style='FontSize=30,Alignment=2,PrimaryColour=&H000000FF,"
+                "Outline=0,Shadow=0,BorderStyle=1,OutlineColour=&H00000000,BackColour=&H00000000,MarginV=84',"
+                f"subtitles='{ffmpeg_filter_path('english.srt')}':"
+                "force_style='FontSize=30,Alignment=2,PrimaryColour=&H0000FF00,"
+                "Outline=0,Shadow=0,BorderStyle=1,OutlineColour=&H00000000,BackColour=&H00000000,MarginV=36'"
+            ),
         )
 
     def test_can_reuse_segment_dub_matches_cached_metadata(self) -> None:

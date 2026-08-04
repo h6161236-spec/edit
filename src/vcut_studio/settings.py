@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -43,6 +44,18 @@ def _default_tts_voice(provider_type: str | None = None) -> str:
     if normalized == "kokoro_local":
         return "af_bella"
     return "emma_clear"
+
+
+_DEFAULT_SUBTITLE_ENGLISH_COLOR = "#FFFFFF"
+_DEFAULT_SUBTITLE_CHINESE_COLOR = "#FFD966"
+_HEX_COLOR_PATTERN = re.compile(r"^#?(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
+
+
+def _normalize_hex_color(value: Any, fallback: str) -> str:
+    normalized = str(value or "").strip()
+    if _HEX_COLOR_PATTERN.fullmatch(normalized):
+        return f"#{normalized.lstrip('#').upper()}"
+    return fallback
 
 
 def _portable_settings_path() -> Path | None:
@@ -246,6 +259,8 @@ class ExportSettings:
     default_export_type: str = "clean_zh"
     subtitle_mode: str = "en"
     subtitle_font_size: int = 28
+    subtitle_english_color: str = _DEFAULT_SUBTITLE_ENGLISH_COLOR
+    subtitle_chinese_color: str = _DEFAULT_SUBTITLE_CHINESE_COLOR
     burn_subtitles: bool = True
     export_sidecar_srt: bool = True
     audio_lufs_target: int = -16
@@ -256,7 +271,15 @@ class ExportSettings:
         return cls(
             default_export_type=str(data.get("default_export_type", "clean_zh")),
             subtitle_mode=str(data.get("subtitle_mode", "en")),
-            subtitle_font_size=int(data.get("subtitle_font_size", 28)),
+            subtitle_font_size=max(1, int(data.get("subtitle_font_size", 28))),
+            subtitle_english_color=_normalize_hex_color(
+                data.get("subtitle_english_color", _DEFAULT_SUBTITLE_ENGLISH_COLOR),
+                _DEFAULT_SUBTITLE_ENGLISH_COLOR,
+            ),
+            subtitle_chinese_color=_normalize_hex_color(
+                data.get("subtitle_chinese_color", _DEFAULT_SUBTITLE_CHINESE_COLOR),
+                _DEFAULT_SUBTITLE_CHINESE_COLOR,
+            ),
             burn_subtitles=bool(data.get("burn_subtitles", True)),
             export_sidecar_srt=bool(data.get("export_sidecar_srt", True)),
             audio_lufs_target=int(data.get("audio_lufs_target", -16)),

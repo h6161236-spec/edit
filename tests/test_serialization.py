@@ -97,6 +97,8 @@ class SettingsStoreTests(unittest.TestCase):
         settings.translation.no_proxy = "localhost,.corp.local"
         settings.export.subtitle_mode = "bilingual"
         settings.export.subtitle_font_size = 36
+        settings.export.subtitle_english_color = "#00ff88"
+        settings.export.subtitle_chinese_color = "#ffdd55"
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "settings.json"
@@ -116,6 +118,8 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(loaded.translation.no_proxy, "localhost,.corp.local")
         self.assertEqual(loaded.export.subtitle_mode, "bilingual")
         self.assertEqual(loaded.export.subtitle_font_size, 36)
+        self.assertEqual(loaded.export.subtitle_english_color, "#00FF88")
+        self.assertEqual(loaded.export.subtitle_chinese_color, "#FFDD55")
 
     def test_settings_store_prefers_portable_settings_next_to_frozen_app(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -134,6 +138,19 @@ class SettingsStoreTests(unittest.TestCase):
 
         self.assertEqual(store.settings_path, settings_path)
         self.assertEqual(loaded.asr.model_name, "medium")
+
+    def test_settings_color_without_hash_is_normalized(self) -> None:
+        loaded = AppSettings.from_dict(
+            {
+                "export": {
+                    "subtitle_english_color": "047bff",
+                    "subtitle_chinese_color": "ffd966",
+                }
+            }
+        )
+
+        self.assertEqual(loaded.export.subtitle_english_color, "#047BFF")
+        self.assertEqual(loaded.export.subtitle_chinese_color, "#FFD966")
 
 
 if __name__ == "__main__":
