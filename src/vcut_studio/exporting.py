@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 import wave
@@ -322,6 +323,8 @@ def _subtitle_text_for_segment(segment: object, subtitle_mode: str) -> str:
     if normalized_mode == "bilingual":
         lines = [line for line in (chinese_text, english_text) if line]
         return "\n".join(lines)
+    if normalized_mode == "zh":
+        return chinese_text
     return english_text
 
 
@@ -609,10 +612,90 @@ def ffmpeg_filter_path(path: str | Path) -> str:
     return value
 
 
-def subtitle_filter_expression(settings: AppSettings, srt_path: str | Path) -> str:
+_HEX_COLOR_PATTERN = re.compile(r"^#?(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
+_DEFAULT_SUBTITLE_ENGLISH_COLOR = "#FFFFFF"
+_DEFAULT_SUBTITLE_CHINESE_COLOR = "#FFD966"
+
+
+def _normalize_subtitle_hex_color(value: str | None, fallback: str) -> str:
+    normalized = str(value or "").strip()
+    if _HEX_COLOR_PATTERN.fullmatch(normalized):
+        return f"#{normalized.lstrip('#').upper()}"
+    return fallback
+
+
+def _hex_color_to_ass(value: str) -> str:
+    normalized = value.upper().lstrip("#")
+    if len(normalized) == 6:
+        red = int(normalized[0:2], 16)
+        green = int(normalized[2:4], 16)
+        blue = int(normalized[4:6], 16)
+        alpha = 0
+    else:
+        alpha_value = int(normalized[0:2], 16)
+        red = int(normalized[2:4], 16)
+        green = int(normalized[4:6], 16)
+        blue = int(normalized[6:8], 16)
+        alpha = max(0, min(255, 255 - alpha_value))
+    return f"&H{alpha:02X}{blue:02X}{green:02X}{red:02X}"
+
+
+def _subtitle_ass_color(settings: AppSettings, subtitle_language: str) -> str:
+    export_settings = getattr(settings, "export", None)
+    if subtitle_language == "zh":
+        configured = getattr(export_settings, "subtitle_chinese_color", _DEFAULT_SUBTITLE_CHINESE_COLOR)
+        color_value = _normalize_subtitle_hex_color(configured, _DEFAULT_SUBTITLE_CHINESE_COLOR)
+    else:
+        configured = getattr(export_settings, "subtitle_english_color", _DEFAULT_SUBTITLE_ENGLISH_COLOR)
+        color_value = _normalize_subtitle_hex_color(configured, _DEFAULT_SUBTITLE_ENGLISH_COLOR)
+    return _hex_color_to_ass(color_value)
+
+
+def subtitle_filter_expression(
+    settings: AppSettings,
+    srt_path: str | Path,
+    *,
+    subtitle_language: str = "en",
+    margin_v: int | None = None,
+) -> str:
     filter_value = f"subtitles='{ffmpeg_filter_path(srt_path)}'"
     font_size = max(1, int(getattr(settings.export, "subtitle_font_size", 28) or 28))
-    return f"{filter_value}:force_style='FontSize={font_size}'"
+    style_fields = [
+        f"FontSize={font_size}",
+        "Alignment=2",
+        f"PrimaryColour={_subtitle_ass_color(settings, subtitle_language)}",
+        "Outline=0",
+        "Shadow=0",
+        "BorderStyle=1",
+        "OutlineColour=&H00000000",
+        "BackColour=&H00000000",
+    ]
+    if margin_v is not None:
+        style_fields.append(f"MarginV={max(0, int(margin_v))}")
+    return f"{filter_value}:force_style='{','.join(style_fields)}'"
+
+
+def bilingual_subtitle_filter_expression(
+    settings: AppSettings,
+    chinese_srt_path: str | Path,
+    english_srt_path: str | Path,
+) -> str:
+    font_size = max(1, int(getattr(settings.export, "subtitle_font_size", 28) or 28))
+    english_margin = max(18, int(round(font_size * 1.2)))
+    chinese_margin = english_margin + max(font_size + 8, int(round(font_size * 1.6)))
+    chinese_filter = subtitle_filter_expression(
+        settings,
+        chinese_srt_path,
+        subtitle_language="zh",
+        margin_v=chinese_margin,
+    )
+    english_filter = subtitle_filter_expression(
+        settings,
+        english_srt_path,
+        subtitle_language="en",
+        margin_v=english_margin,
+    )
+    return f"{chinese_filter},{english_filter}"
 
 
 def render_video_with_subtitles(
@@ -624,10 +707,27 @@ def render_video_with_subtitles(
     burn_subtitles: bool,
     has_audio: bool,
     srt_path: str | Path,
+    subtitle_mode: str = "en",
+    chinese_srt_path: str | Path | None = None,
+    english_srt_path: str | Path | None = None,
     controller: object | None = None,
 ) -> Path:
     destination = Path(output_path)
     if burn_subtitles:
+        normalized_mode = str(subtitle_mode or "en").strip().lower()
+        subtitle_filter = subtitle_filter_expression(settings, srt_path, subtitle_language="en")
+        if (
+            normalized_mode == "bilingual"
+            and chinese_srt_path is not None
+            and english_srt_path is not None
+        ):
+            subtitle_filter = bilingual_subtitle_filter_expression(
+                settings,
+                chinese_srt_path,
+                english_srt_path,
+            )
+        elif normalized_mode == "zh":
+            subtitle_filter = subtitle_filter_expression(settings, srt_path, subtitle_language="zh")
         command = [
             _effective_ffmpeg_path(settings),
             "-y" if settings.media.overwrite_existing else "-n",
@@ -635,7 +735,7 @@ def render_video_with_subtitles(
             "-i",
             str(base_video_path),
             "-vf",
-            subtitle_filter_expression(settings, srt_path),
+            subtitle_filter,
             "-c:v",
             settings.media.video_codec,
         ]
@@ -863,6 +963,15 @@ def export_english_subtitle_video(
     with tempfile.TemporaryDirectory(prefix="vcut_subtitle_") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
         srt_path = write_srt(subtitle_cues, temp_dir / "english_subtitles.srt")
+        chinese_srt_path: Path | None = None
+        english_srt_path: Path | None = None
+        normalized_subtitle_mode = str(subtitle_mode or "en").strip().lower()
+        if burn_subtitles and normalized_subtitle_mode == "bilingual":
+            chinese_cues = build_subtitle_cues(project, plan.keep_ranges, subtitle_mode="zh")
+            english_cues = build_subtitle_cues(project, plan.keep_ranges, subtitle_mode="en")
+            if chinese_cues and english_cues:
+                chinese_srt_path = write_srt(chinese_cues, temp_dir / "chinese_subtitles.srt")
+                english_srt_path = write_srt(english_cues, temp_dir / "english_only_subtitles.srt")
 
         base_video_path = Path(project.video_path)
         if plan.cut_ranges:
@@ -885,6 +994,9 @@ def export_english_subtitle_video(
             burn_subtitles=burn_subtitles,
             has_audio=project.media_info.has_audio,
             srt_path=srt_path,
+            subtitle_mode=subtitle_mode,
+            chinese_srt_path=chinese_srt_path,
+            english_srt_path=english_srt_path,
             controller=controller,
         )
 
@@ -1158,6 +1270,15 @@ def export_english_dub_video(
             if not subtitle_cues:
                 raise ExportError("No English subtitle text is available. Add translated English text before exporting.")
             srt_path = write_srt(subtitle_cues, temp_dir / "english_dub_subtitles.srt")
+            chinese_srt_path: Path | None = None
+            english_srt_path: Path | None = None
+            normalized_subtitle_mode = str(subtitle_mode or "en").strip().lower()
+            if burn_subtitles and normalized_subtitle_mode == "bilingual":
+                chinese_cues = build_subtitle_cues_from_dub_cues(project, stretched_dub_cues, subtitle_mode="zh")
+                english_cues = build_subtitle_cues_from_dub_cues(project, stretched_dub_cues, subtitle_mode="en")
+                if chinese_cues and english_cues:
+                    chinese_srt_path = write_srt(chinese_cues, temp_dir / "chinese_dub_subtitles.srt")
+                    english_srt_path = write_srt(english_cues, temp_dir / "english_dub_only_subtitles.srt")
             _notify_progress(progress_callback, 95, "正在封装英文配音字幕视频...")
             render_video_with_subtitles(
                 dubbed_video_path,
@@ -1167,6 +1288,9 @@ def export_english_dub_video(
                 burn_subtitles=burn_subtitles,
                 has_audio=True,
                 srt_path=srt_path,
+                subtitle_mode=subtitle_mode,
+                chinese_srt_path=chinese_srt_path,
+                english_srt_path=english_srt_path,
                 controller=controller,
             )
             if export_sidecar_srt:
