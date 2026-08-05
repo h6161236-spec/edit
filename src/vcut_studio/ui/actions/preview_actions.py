@@ -118,13 +118,10 @@ class PreviewActionsMixin:
         )
         return str(preview_path)
 
-    def play_preview(self) -> None:
+    def toggle_preview_playback(self) -> None:
         if not self.context.current_project.video_path:
             self.statusBar().showMessage("请先导入视频。", 4000)
             return
-        self.preview_player.play()
-
-    def pause_preview(self) -> None:
         if self.preview_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.preview_player.pause()
         else:
@@ -151,4 +148,3 @@ class PreviewActionsMixin:
     def _on_preview_error(self, _error: object, error_text: str) -> None:
         if error_text:
             self.statusBar().showMessage(f"视频监看不可用：{error_text}", 8000)
-

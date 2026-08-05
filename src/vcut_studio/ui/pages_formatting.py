@@ -84,6 +84,35 @@ def suggestion_filter_matches(reason: str, filter_value: str) -> bool:
     return reason == normalized
 
 
+def subtitle_texts_at_position(
+    segments: list[object],
+    position_ms: int,
+    subtitle_mode: str,
+) -> tuple[str, str]:
+    """Return the visible Chinese and English subtitle text at a preview position."""
+    current_position = max(0, int(position_ms))
+    active_segment = next(
+        (
+            segment
+            for segment in segments
+            if int(getattr(segment, "start_ms", 0)) <= current_position
+            < int(getattr(segment, "end_ms", 0))
+        ),
+        None,
+    )
+    if active_segment is None:
+        return "", ""
+
+    chinese_text = str(getattr(active_segment, "zh_text", "") or "").strip()
+    english_text = str(getattr(active_segment, "en_text", "") or "").strip()
+    normalized_mode = str(subtitle_mode or "en").strip().lower()
+    if normalized_mode == "bilingual":
+        return chinese_text, english_text
+    if normalized_mode == "zh":
+        return (chinese_text, "") if chinese_text else ("", english_text)
+    return ("", english_text) if english_text else (chinese_text, "")
+
+
 def format_internal_status(status: str) -> str:
     status_map = {
         "pending": "待处理",

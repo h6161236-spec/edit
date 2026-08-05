@@ -8,6 +8,7 @@ from vcut_studio.ui.pages_formatting import (
     format_suggestion_type,
     format_timestamp,
     segment_overlap_ms,
+    subtitle_texts_at_position,
     suggestion_filter_matches,
     timestamp_to_qtime,
 )
@@ -63,6 +64,26 @@ class FormattingFunctionTests(unittest.TestCase):
         # [100,400] overlaps [50,350] on [100,350] -> 250ms
         self.assertEqual(segment_overlap_ms(50, 350, suggestions), 250)
         self.assertEqual(segment_overlap_ms(0, 0, suggestions), 0)
+
+    def test_subtitle_texts_at_position_respects_mode_and_actual_content(self) -> None:
+        class Segment:
+            def __init__(self, start_ms: int, end_ms: int, zh_text: str, en_text: str) -> None:
+                self.start_ms = start_ms
+                self.end_ms = end_ms
+                self.zh_text = zh_text
+                self.en_text = en_text
+
+        segments = [
+            Segment(100, 500, "中文", "English"),
+            Segment(500, 900, "只有中文", ""),
+        ]
+
+        self.assertEqual(subtitle_texts_at_position(segments, 99, "bilingual"), ("", ""))
+        self.assertEqual(subtitle_texts_at_position(segments, 100, "en"), ("", "English"))
+        self.assertEqual(subtitle_texts_at_position(segments, 499, "bilingual"), ("中文", "English"))
+        self.assertEqual(subtitle_texts_at_position(segments, 500, "bilingual"), ("只有中文", ""))
+        self.assertEqual(subtitle_texts_at_position(segments, 500, "en"), ("只有中文", ""))
+        self.assertEqual(subtitle_texts_at_position(segments, 900, "bilingual"), ("", ""))
 
 
 if __name__ == "__main__":

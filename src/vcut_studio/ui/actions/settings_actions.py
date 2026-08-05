@@ -37,6 +37,7 @@ class SettingsActionsMixin:
             QMessageBox.critical(self, "保存设置失败", str(exc))
             return
         self.context.settings = new_settings
+        self._apply_workspace_style()
         self._configure_autosave_timer()
         if self._tts_cache_signature(new_settings) != previous_tts_signature:
             self._invalidate_all_dubs()
@@ -47,6 +48,7 @@ class SettingsActionsMixin:
         if not self._require_idle_background("恢复默认设置"):
             return
         self.context.settings = AppSettings()
+        self._apply_workspace_style()
         self._configure_autosave_timer()
         self._invalidate_all_dubs()
         self.settings_page.load_settings(self.context.settings)
@@ -148,4 +150,3 @@ class SettingsActionsMixin:
         directory = QFileDialog.getExistingDirectory(self, "选择导出目录", initial_dir)
         if directory:
             self.export_page.output_dir_edit.setText(directory)
-

@@ -22,6 +22,30 @@ from ..pages_formatting import format_voice_label
 from ...media import MediaProbeError, probe_media
 
 
+VIDEO_FILE_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
+PROJECT_FILE_EXTENSION = ".vcutproj"
+
+
+def import_kind_for_path(path: str | Path) -> str | None:
+    suffix = Path(path).suffix.lower()
+    if suffix == PROJECT_FILE_EXTENSION:
+        return "project"
+    if suffix in VIDEO_FILE_EXTENSIONS:
+        return "video"
+    return None
+
+
+def project_has_active_content(project: Project, project_path: Path | None) -> bool:
+    return bool(
+        project_path
+        or project.video_path
+        or project.audio_path
+        or project.segments
+        or project.cut_suggestions
+        or project.exports
+    )
+
+
 class ProjectActionsMixin:
     """ProjectActions actions for the main window."""
 
@@ -41,8 +65,6 @@ class ProjectActionsMixin:
     def import_video(self) -> None:
         if not self._require_idle_background("导入其他视频"):
             return
-        if not self._confirm_project_switch("导入视频"):
-            return
         workspace_dir = self.context.settings.workspace.workspace_dir
         filename, _ = QFileDialog.getOpenFileName(
             self,
@@ -52,6 +74,12 @@ class ProjectActionsMixin:
         )
         if not filename:
             return
+        if not self._confirm_project_switch("导入视频"):
+            return
+        self._import_video_path(filename)
+
+    def _import_video_path(self, filename: str | Path) -> None:
+        filename = str(Path(filename))
 
         self._set_task_progress(15, "正在探测视频信息...", pump_events=True)
         try:
@@ -95,8 +123,6 @@ class ProjectActionsMixin:
     def open_project(self) -> None:
         if not self._require_idle_background("打开其他项目"):
             return
-        if not self._confirm_project_switch("打开其他项目"):
-            return
         workspace_dir = self.context.settings.workspace.workspace_dir
         filename, _ = QFileDialog.getOpenFileName(
             self,
@@ -106,15 +132,40 @@ class ProjectActionsMixin:
         )
         if not filename:
             return
+        self._open_project_path(filename)
+
+    def _open_project_path(self, filename: str | Path) -> None:
+        filename = str(Path(filename))
         try:
             project = self.context.project_store.load(filename)
         except Exception as exc:
             QMessageBox.critical(self, "打开项目失败", str(exc))
             return
+        if not self._confirm_project_switch("打开其他项目"):
+            return
         self.context.set_project(project, Path(filename))
         self._clear_proofread_snapshot()
         self.refresh_views()
         self.statusBar().showMessage(f"已打开项目：{filename}", 5000)
+
+    def import_dropped_path(self, path: str | Path) -> None:
+        source_path = Path(path)
+        import_kind = import_kind_for_path(source_path)
+        if import_kind is None:
+            QMessageBox.warning(
+                self,
+                "不支持的文件",
+                "请拖入 VCut Studio 项目文件或视频文件。",
+            )
+            return
+        if not self._require_idle_background("拖入文件"):
+            return
+        if import_kind == "project":
+            self._open_project_path(source_path)
+            return
+        if not self._confirm_project_switch("导入视频"):
+            return
+        self._import_video_path(source_path)
 
     def save_project(self) -> bool:
         if not self._require_idle_background("保存项目"):
@@ -152,22 +203,36 @@ class ProjectActionsMixin:
         return True
 
     def _confirm_project_switch(self, action_text: str) -> bool:
-        if not self.context.project_dirty:
+        has_active_project = project_has_active_content(
+            self.context.current_project,
+            self.context.current_project_path,
+        )
+        if not has_active_project:
             return True
+        if self.context.project_dirty:
+            reply = QMessageBox.question(
+                self,
+                "项目尚未保存",
+                f"当前项目有未保存修改。{action_text}前要先保存吗？",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return False
+            if reply == QMessageBox.StandardButton.Save:
+                return self.save_project()
+            return True
+
         reply = QMessageBox.question(
             self,
-            "项目尚未保存",
-            f"当前项目有未保存修改。{action_text}前要先保存吗？",
-            QMessageBox.StandardButton.Save
-            | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Save,
+            "切换当前项目",
+            f"当前项目“{self.context.current_project.name}”已经载入。{action_text}会关闭当前项目，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.StandardButton.Cancel:
-            return False
-        if reply == QMessageBox.StandardButton.Save:
-            return self.save_project()
-        return True
+        return reply == QMessageBox.StandardButton.Yes
 
     def _configure_autosave_timer(self) -> None:
         interval_minutes = max(1, int(self.context.settings.workspace.auto_save_minutes or 1))
@@ -214,4 +279,3 @@ class ProjectActionsMixin:
         if status_message:
             self.statusBar().showMessage(f"{status_message}：{saved_path}", 5000)
         return saved_path
-

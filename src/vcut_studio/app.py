@@ -5,7 +5,7 @@ import logging
 import sys
 
 from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .context import AppContext
@@ -60,22 +60,6 @@ def run() -> int:
     app.setStyle("Fusion")
     app.setApplicationName("VCut Studio")
     app.setOrganizationName("VCut Studio")
-    palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window, QColor("#161a1f"))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor("#e5e7eb"))
-    palette.setColor(QPalette.ColorRole.Base, QColor("#11151b"))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#18202a"))
-    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#11151b"))
-    palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#f8fafc"))
-    palette.setColor(QPalette.ColorRole.Text, QColor("#e5e7eb"))
-    palette.setColor(QPalette.ColorRole.Button, QColor("#273445"))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor("#f3f4f6"))
-    palette.setColor(QPalette.ColorRole.BrightText, QColor("#ffffff"))
-    palette.setColor(QPalette.ColorRole.Link, QColor("#38bdf8"))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor("#0f766e"))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#7c8798"))
-    app.setPalette(palette)
     icon_path = find_app_icon()
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))

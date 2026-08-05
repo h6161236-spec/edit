@@ -88,6 +88,7 @@ class SettingsStoreTests(unittest.TestCase):
         settings.asr.model_cache_dir = "D:/models/huggingface"
         settings.asr.local_model_dir = "D:/models/faster-whisper-medium"
         settings.asr.local_files_only = True
+        settings.workspace.theme_mode = "light"
         settings.translation.base_url = "https://example.test/v1"
         settings.translation.api_key = "dummy-api-key"
         settings.translation.model = "test-model"
@@ -109,6 +110,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(loaded.asr.model_cache_dir, "D:/models/huggingface")
         self.assertEqual(loaded.asr.local_model_dir, "D:/models/faster-whisper-medium")
         self.assertTrue(loaded.asr.local_files_only)
+        self.assertEqual(loaded.workspace.theme_mode, "light")
         self.assertEqual(loaded.translation.base_url, "https://example.test/v1")
         self.assertEqual(loaded.translation.api_key, "dummy-api-key")
         self.assertEqual(loaded.translation.model, "test-model")
@@ -151,6 +153,11 @@ class SettingsStoreTests(unittest.TestCase):
 
         self.assertEqual(loaded.export.subtitle_english_color, "#047BFF")
         self.assertEqual(loaded.export.subtitle_chinese_color, "#FFD966")
+
+    def test_invalid_theme_mode_falls_back_to_system(self) -> None:
+        loaded = AppSettings.from_dict({"workspace": {"theme_mode": "neon"}})
+
+        self.assertEqual(loaded.workspace.theme_mode, "system")
 
     def test_settings_from_dict_tolerates_corrupted_values(self) -> None:
         loaded = AppSettings.from_dict(

@@ -148,6 +148,7 @@ def _default_settings_path() -> Path:
 class WorkspaceSettings:
     workspace_dir: str = field(default_factory=_default_workspace_dir)
     temp_dir: str = field(default_factory=_default_temp_dir)
+    theme_mode: str = "system"
     auto_save_minutes: int = 3
     recent_projects_limit: int = 10
     log_level: str = "INFO"
@@ -157,6 +158,11 @@ class WorkspaceSettings:
         return cls(
             workspace_dir=str(data.get("workspace_dir", _default_workspace_dir())),
             temp_dir=str(data.get("temp_dir", _default_temp_dir())),
+            theme_mode=(
+                str(data.get("theme_mode", "system")).strip().lower()
+                if str(data.get("theme_mode", "system")).strip().lower() in {"system", "dark", "light"}
+                else "system"
+            ),
             auto_save_minutes=_as_int(data.get("auto_save_minutes", 3), 3, minimum=1, maximum=720),
             recent_projects_limit=_as_int(data.get("recent_projects_limit", 10), 10, minimum=0, maximum=100),
             log_level=str(data.get("log_level", "INFO")),

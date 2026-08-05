@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import QThread, QTimer
-from PySide6.QtGui import QCloseEvent, QIcon
+from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDragLeaveEvent, QDropEvent, QIcon
 from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +26,7 @@ from ..media import resolve_ffmpeg_path
 from ..providers.tts import tts_provider_display_name, tts_provider_runtime_status
 from ..runtime_assets import find_app_icon
 from .pages import DubbingPage, ExportPage, SettingsPage, TimelinePage, TranslationPage
+from .theme import application_palette, resolve_theme_mode, workspace_stylesheet
 from .workers import (
     AnalysisWorker,
     ControllableWorker,
@@ -45,7 +47,7 @@ except ImportError:  # pragma: no cover - non-Windows runtime path
 from .actions.dubbing_actions import DubbingActionsMixin
 from .actions.export_actions import ExportActionsMixin
 from .actions.analysis_actions import AnalysisActionsMixin
-from .actions.project_actions import ProjectActionsMixin
+from .actions.project_actions import ProjectActionsMixin, import_kind_for_path
 from .actions.preview_actions import PreviewActionsMixin
 from .actions.settings_actions import SettingsActionsMixin
 from .actions.translation_actions import TranslationActionsMixin
@@ -64,6 +66,7 @@ class MainWindow(
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.context = context
+        self.setAcceptDrops(True)
         self.resize(1500, 960)
         self._apply_window_icon()
         self._apply_workspace_style()
@@ -73,6 +76,8 @@ class MainWindow(
         self.dubbing_page = DubbingPage()
         self.export_page = ExportPage()
         self.settings_page = SettingsPage()
+        self._apply_theme_to_pages()
+        self._connect_system_theme()
         self.analysis_busy = False
         self.translation_busy = False
         self.dubbing_busy = False
@@ -126,7 +131,7 @@ class MainWindow(
         self.preview_audio_output.setMuted(False)
         self.preview_player = QMediaPlayer(self)
         self.preview_player.setAudioOutput(self.preview_audio_output)
-        self.preview_player.setVideoOutput(self.timeline_page.video_widget)
+        self.preview_player.setVideoOutput(self.timeline_page.video_item)
         self.media_devices = QMediaDevices(self)
         self.media_devices.audioOutputsChanged.connect(self._sync_preview_audio_device)
         self._sync_preview_audio_device()
@@ -138,13 +143,46 @@ class MainWindow(
         self._configure_autosave_timer()
         self.refresh_views()
 
+    def _supported_drop_path(self, event: QDragEnterEvent | QDropEvent) -> str | None:
+        mime_data = event.mimeData()
+        if not mime_data.hasUrls():
+            return None
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            local_path = url.toLocalFile()
+            if import_kind_for_path(local_path) is not None:
+                return local_path
+        return None
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        path = self._supported_drop_path(event)
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.statusBar().showMessage(f"松开以导入：{Path(path).name}")
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self.statusBar().clearMessage()
+        event.accept()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        path = self._supported_drop_path(event)
+        self.statusBar().clearMessage()
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.import_dropped_path(path)
+
     def _apply_window_icon(self) -> None:
         icon_path = find_app_icon()
         if icon_path is not None:
             self.setWindowIcon(QIcon(str(icon_path)))
 
     def _apply_workspace_style(self) -> None:
-        self.setStyleSheet(
+        legacy_dark_stylesheet = (
             """
             QMainWindow, QDialog, QMessageBox {
                 background: #161a1f;
@@ -196,11 +234,6 @@ class MainWindow(
                 color: #f8fafc;
                 font-size: 18px;
                 font-weight: 700;
-            }
-            QLabel#settingsHeaderText,
-            QLabel#settingsNavHint,
-            QLabel#settingsSectionText {
-                color: #94a3b8;
             }
             QLabel#settingsNavTitle {
                 color: #f8fafc;
@@ -337,12 +370,40 @@ class MainWindow(
             QSplitter::handle {
                 background: #11151b;
             }
-            QVideoWidget {
+            QGraphicsView#videoPreviewView {
                 background: #090c10;
                 border-radius: 10px;
             }
             """
         )
+        self._active_theme = resolve_theme_mode(self.context.settings.workspace.theme_mode)
+        app = QApplication.instance()
+        if app is not None:
+            app.setPalette(application_palette(self._active_theme))
+            app.setStyleSheet(
+                legacy_dark_stylesheet
+                if self._active_theme == "dark"
+                else workspace_stylesheet(self._active_theme)
+            )
+        self._apply_theme_to_pages()
+
+    def _apply_theme_to_pages(self) -> None:
+        if hasattr(self, "timeline_page"):
+            self.timeline_page.set_theme(self._active_theme)
+        if hasattr(self, "settings_page"):
+            self.settings_page.set_theme(self._active_theme)
+
+    def _connect_system_theme(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        color_scheme_changed = getattr(app.styleHints(), "colorSchemeChanged", None)
+        if color_scheme_changed is not None:
+            color_scheme_changed.connect(self._on_system_theme_changed)
+
+    def _on_system_theme_changed(self, _scheme: object) -> None:
+        if self.context.settings.workspace.theme_mode == "system":
+            self._apply_workspace_style()
 
     def _build_status_controls(self) -> None:
         control_container = QWidget(self)
@@ -404,8 +465,7 @@ class MainWindow(
         self.timeline_page.suggestion_range_apply_requested.connect(self.update_suggestion_range)
         self.timeline_page.segment_selection_changed.connect(self.locate_selected_segment)
         self.timeline_page.seek_requested.connect(self.seek_preview)
-        self.timeline_page.play_requested.connect(self.play_preview)
-        self.timeline_page.pause_requested.connect(self.pause_preview)
+        self.timeline_page.play_pause_requested.connect(self.toggle_preview_playback)
         self.timeline_page.stop_requested.connect(self.stop_preview)
         self.timeline_page.preview_volume_changed.connect(self.set_preview_volume)
         self.timeline_page.preview_mute_toggled.connect(self.set_preview_muted)
@@ -591,7 +651,7 @@ class MainWindow(
     def refresh_views(self) -> None:
         project = self.context.current_project
         self._update_window_title()
-        self.timeline_page.load_project(project)
+        self.timeline_page.load_project(project, self.context.settings)
         self._sync_timeline_preview(project)
         self.translation_page.load_project(project, self.context.settings)
         self.dubbing_page.load_project(project, self.context.settings)

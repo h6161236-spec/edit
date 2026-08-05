@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtCore import QItemSelectionModel, QRectF, QSize, QSizeF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -14,6 +14,9 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
+    QGraphicsScene,
+    QGraphicsTextItem,
+    QGraphicsView,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -58,6 +61,7 @@ from .pages_formatting import (
     qtime_to_timestamp,
     segment_overlap_ms,
     set_combo_value,
+    subtitle_texts_at_position,
     suggestion_filter_matches,
     timestamp_to_qtime,
 )
@@ -68,13 +72,13 @@ from .dubbing_logic import (
     segment_target_voice_id,
 )
 
-SEGMENT_REMOVED_COLOR = QColor("#2f2527")
-SEGMENT_TRIMMED_COLOR = QColor("#3a3423")
-SUGGESTION_ACCEPTED_COLOR = QColor("#1d3a36")
-DUB_REUSABLE_COLOR = QColor("#1d3a36")
-DUB_STALE_COLOR = QColor("#3a3423")
-DUB_MISSING_COLOR = QColor("#242b35")
-DUB_GENERATING_COLOR = QColor("#1d3142")
+SEGMENT_REMOVED_COLOR = QColor(239, 68, 68, 42)
+SEGMENT_TRIMMED_COLOR = QColor(245, 158, 11, 42)
+SUGGESTION_ACCEPTED_COLOR = QColor(16, 185, 129, 42)
+DUB_REUSABLE_COLOR = QColor(16, 185, 129, 42)
+DUB_STALE_COLOR = QColor(245, 158, 11, 42)
+DUB_MISSING_COLOR = QColor(100, 116, 139, 35)
+DUB_GENERATING_COLOR = QColor(59, 130, 246, 42)
 
 
 
@@ -89,10 +93,15 @@ class AudioTrackWidget(QWidget):
         self._waveform_points: list[float] = []
         self._focus_range: tuple[int, int] | None = None
         self._suggestions: list[tuple[int, int, bool]] = []
-        self.setMinimumHeight(110)
+        self._theme = "dark"
+        self.setMinimumHeight(122)
 
     def sizeHint(self) -> QSize:
-        return QSize(640, 110)
+        return QSize(640, 122)
+
+    def set_theme(self, theme: str) -> None:
+        self._theme = "light" if theme == "light" else "dark"
+        self.update()
 
     def clear(self) -> None:
         self._duration_ms = 0
@@ -142,20 +151,37 @@ class AudioTrackWidget(QWidget):
     def paintEvent(self, _event: object) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.fillRect(self.rect(), QColor("#0f141a"))
+        is_light = self._theme == "light"
+        outer = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        background = QLinearGradient(outer.topLeft(), outer.bottomLeft())
+        background.setColorAt(0.0, QColor("#F8FAFC") if is_light else QColor("#121A22"))
+        background.setColorAt(1.0, QColor("#E8EEF5") if is_light else QColor("#0A1016"))
+        painter.setPen(QPen(QColor("#CBD5E1") if is_light else QColor("#273442"), 1))
+        painter.setBrush(background)
+        painter.drawRoundedRect(outer, 10, 10)
 
-        if self._duration_ms <= 0:
-            painter.setPen(QColor("#8b9bb0"))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "导入视频后，这里会显示音轨和时间轴。")
-            return
-
-        bounds = self.rect().adjusted(12, 10, -12, -10)
+        bounds = self.rect().adjusted(14, 12, -14, -12)
         if bounds.width() <= 0 or bounds.height() <= 0:
             return
+
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(QRectF(bounds), 7, 7)
+        painter.save()
+        painter.setClipPath(clip_path)
 
         def _time_to_x(value_ms: int) -> float:
             ratio = min(1.0, max(0.0, value_ms / max(1, self._duration_ms)))
             return bounds.left() + bounds.width() * ratio
+
+        grid_color = QColor("#D6E0EA") if is_light else QColor("#22303D")
+        painter.setPen(QPen(grid_color, 1, Qt.PenStyle.DotLine))
+        for step in range(1, 8):
+            x_pos = bounds.left() + bounds.width() * step / 8
+            painter.drawLine(x_pos, bounds.top(), x_pos, bounds.bottom())
+
+        if self._duration_ms <= 0:
+            painter.restore()
+            return
 
         painter.setPen(Qt.PenStyle.NoPen)
         for start_ms, end_ms, accepted in self._suggestions:
@@ -165,7 +191,7 @@ class AudioTrackWidget(QWidget):
                 max(2.0, _time_to_x(end_ms) - _time_to_x(start_ms)),
                 bounds.height(),
             )
-            painter.fillRect(rect, QColor(190, 65, 72, 88 if accepted else 40))
+            painter.fillRect(rect, QColor(220, 38, 38, 72 if accepted else 28))
 
         if self._focus_range is not None:
             start_ms, end_ms = self._focus_range
@@ -175,30 +201,64 @@ class AudioTrackWidget(QWidget):
                 max(2.0, _time_to_x(end_ms) - _time_to_x(start_ms)),
                 bounds.height(),
             )
-            painter.fillRect(focus_rect, QColor(45, 110, 184, 84))
-            painter.setPen(QPen(QColor("#60a5fa"), 1.5))
+            painter.fillRect(focus_rect, QColor(37, 99, 235, 48 if is_light else 68))
+            painter.setPen(QPen(QColor("#2563EB") if is_light else QColor("#60A5FA"), 1.5))
             painter.drawRect(focus_rect)
 
         mid_y = bounds.center().y()
-        painter.setPen(QPen(QColor("#334155"), 1))
+        painter.setPen(QPen(QColor("#B9C6D4") if is_light else QColor("#334155"), 1))
         painter.drawLine(bounds.left(), mid_y, bounds.right(), mid_y)
 
         points = self._waveform_points or [0.0]
-        painter.setPen(QPen(QColor("#20c997"), 1))
-        point_count = max(1, len(points))
-        for point_index, point in enumerate(points):
-            x_pos = bounds.left() + (bounds.width() * point_index / max(1, point_count - 1))
-            amplitude = max(2.0, point * (bounds.height() / 2.0))
-            painter.drawLine(
-                x_pos,
-                mid_y - amplitude,
-                x_pos,
-                mid_y + amplitude,
-            )
+        max_points = max(2, int(bounds.width()))
+        stride = max(1, len(points) // max_points)
+        sampled_points = points[::stride]
+        if sampled_points[-1] != points[-1]:
+            sampled_points.append(points[-1])
 
+        waveform_path = QPainterPath()
+        waveform_path.moveTo(bounds.left(), mid_y)
+        point_count = max(1, len(sampled_points))
+        coordinates: list[tuple[float, float]] = []
+        for point_index, point in enumerate(sampled_points):
+            x_pos = bounds.left() + bounds.width() * point_index / max(1, point_count - 1)
+            amplitude = max(1.5, min(1.0, max(0.0, float(point))) * bounds.height() * 0.46)
+            coordinates.append((x_pos, amplitude))
+            waveform_path.lineTo(x_pos, mid_y - amplitude)
+        for x_pos, amplitude in reversed(coordinates):
+            waveform_path.lineTo(x_pos, mid_y + amplitude)
+        waveform_path.closeSubpath()
+
+        muted_wave = QColor(13, 148, 136, 68 if is_light else 74)
+        painter.fillPath(waveform_path, muted_wave)
         playhead_x = _time_to_x(self._position_ms)
-        painter.setPen(QPen(QColor("#7dd3fc"), 2))
+        played_gradient = QLinearGradient(0, bounds.top(), 0, bounds.bottom())
+        played_gradient.setColorAt(0.0, QColor("#14B8A6") if is_light else QColor("#2DD4BF"))
+        played_gradient.setColorAt(0.5, QColor("#0F766E") if is_light else QColor("#0D9488"))
+        played_gradient.setColorAt(1.0, QColor("#14B8A6") if is_light else QColor("#2DD4BF"))
+        painter.save()
+        painter.setClipRect(QRectF(bounds.left(), bounds.top(), max(0.0, playhead_x - bounds.left()), bounds.height()))
+        painter.fillPath(waveform_path, played_gradient)
+        painter.restore()
+        painter.setPen(QPen(QColor("#0F766E") if is_light else QColor("#5EEAD4"), 0.8))
+        painter.drawPath(waveform_path)
+
+        playhead_color = QColor("#0284C7") if is_light else QColor("#7DD3FC")
+        painter.setPen(QPen(playhead_color, 2))
         painter.drawLine(playhead_x, bounds.top(), playhead_x, bounds.bottom())
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(playhead_color)
+        painter.drawEllipse(QRectF(playhead_x - 4, bounds.top() - 1, 8, 8))
+        painter.restore()
+
+
+class VideoPreviewView(QGraphicsView):
+    resized = Signal(int, int)
+
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)
+        viewport_size = self.viewport().size()
+        self.resized.emit(viewport_size.width(), viewport_size.height())
 
 
 class HomePage(QWidget):
@@ -209,15 +269,9 @@ class HomePage(QWidget):
 
         title = QLabel("VCut Studio")
         title.setStyleSheet("font-size: 28px; font-weight: 700;")
-        subtitle = QLabel("Windows 桌面端视频工具，支持两条独立任务：删除停顿/语气词，以及中文视频翻译/英文配音。")
-        subtitle.setWordWrap(True)
 
         self.project_summary = QLabel()
         self.project_summary.setWordWrap(True)
-        self.workflow_summary = QLabel(
-            "建议流程：先识别字幕/分段，再根据需要单独走“删除建议剪辑”或“翻译/配音”路线。"
-        )
-        self.workflow_summary.setWordWrap(True)
 
         button_row = QHBoxLayout()
         self.new_project_button = QPushButton("新建项目")
@@ -243,10 +297,8 @@ class HomePage(QWidget):
         dependency_layout.addWidget(self.dependency_table)
 
         layout.addWidget(title)
-        layout.addWidget(subtitle)
         layout.addLayout(button_row)
         layout.addWidget(self.project_summary)
-        layout.addWidget(self.workflow_summary)
         layout.addWidget(dependency_group, stretch=1)
 
     def set_project_info(self, project: Project, project_path: Path | None) -> None:
@@ -275,8 +327,7 @@ class TimelinePage(QWidget):
     suggestion_range_apply_requested = Signal(int, int, int)
     segment_selection_changed = Signal(list)
     seek_requested = Signal(int)
-    play_requested = Signal()
-    pause_requested = Signal()
+    play_pause_requested = Signal()
     stop_requested = Signal()
     preview_volume_changed = Signal(int)
     preview_mute_toggled = Signal(bool)
@@ -295,13 +346,14 @@ class TimelinePage(QWidget):
         self._visible_suggestion_rows: list[int] = []
         self._loaded_project: Project | None = None
         self._preview_muted = False
+        self._subtitle_mode = "en"
+        self._subtitle_font_size = 28
+        self._subtitle_chinese_color = QColor("#FFD966")
+        self._subtitle_english_color = QColor("#FFFFFF")
+        self._theme = "dark"
 
         root = QVBoxLayout(self)
         root.setSpacing(12)
-
-        self.info_label = QLabel("识别字幕用于翻译；删除建议用于剪辑，这两条任务可以单独使用。")
-        self.info_label.setWordWrap(True)
-        root.addWidget(self.info_label)
 
         self.analysis_progress_bar = QProgressBar()
         self.analysis_progress_bar.setRange(0, 100)
@@ -312,13 +364,41 @@ class TimelinePage(QWidget):
 
         preview_container = QGroupBox("视频监看与音轨")
         preview_layout = QVBoxLayout(preview_container)
-        self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumHeight(360)
-        preview_layout.addWidget(self.video_widget, stretch=1)
+        self.video_scene = QGraphicsScene(self)
+        self.video_view = VideoPreviewView()
+        self.video_view.setObjectName("videoPreviewView")
+        self.video_view.setScene(self.video_scene)
+        self.video_view.setMinimumHeight(360)
+        self.video_view.setFrameShape(QFrame.Shape.NoFrame)
+        self.video_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.video_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.video_view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+
+        self.video_item = QGraphicsVideoItem()
+        self.video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
+        self.video_item.setZValue(0)
+        self.video_scene.addItem(self.video_item)
+
+        self.preview_chinese_subtitle_item = QGraphicsTextItem()
+        self.preview_english_subtitle_item = QGraphicsTextItem()
+        for item in (
+            self.preview_chinese_subtitle_item,
+            self.preview_english_subtitle_item,
+        ):
+            item.setZValue(10)
+            item.document().setDocumentMargin(0)
+            text_option = item.document().defaultTextOption()
+            text_option.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.document().setDefaultTextOption(text_option)
+            self.video_scene.addItem(item)
+
+        self.video_view.resized.connect(self._layout_preview_scene)
+        preview_layout.addWidget(self.video_view, stretch=1)
+        self._apply_preview_subtitle_style()
+        self._refresh_preview_subtitles()
 
         preview_buttons = QHBoxLayout()
-        self.play_button = QPushButton("播放")
-        self.pause_button = QPushButton("暂停画面")
+        self.play_pause_button = QPushButton("播放")
         self.stop_preview_button = QPushButton("停止")
         self.mute_preview_button = QPushButton("静音")
         self.mute_preview_button.setCheckable(True)
@@ -327,8 +407,7 @@ class TimelinePage(QWidget):
         self.preview_volume_slider.setValue(100)
         self.preview_volume_slider.setFixedWidth(150)
         self.preview_volume_value_label = QLabel("100%")
-        preview_buttons.addWidget(self.play_button)
-        preview_buttons.addWidget(self.pause_button)
+        preview_buttons.addWidget(self.play_pause_button)
         preview_buttons.addWidget(self.stop_preview_button)
         preview_buttons.addSpacing(8)
         preview_buttons.addWidget(QLabel("音量"))
@@ -353,8 +432,7 @@ class TimelinePage(QWidget):
         preview_layout.addWidget(self.audio_track_widget)
         root.addWidget(preview_container, stretch=3)
 
-        self.play_button.clicked.connect(self.play_requested.emit)
-        self.pause_button.clicked.connect(self.pause_requested.emit)
+        self.play_pause_button.clicked.connect(self.play_pause_requested.emit)
         self.stop_preview_button.clicked.connect(self.stop_requested.emit)
         self.preview_volume_slider.valueChanged.connect(self.preview_volume_changed.emit)
         self.mute_preview_button.toggled.connect(self.preview_mute_toggled.emit)
@@ -456,6 +534,13 @@ class TimelinePage(QWidget):
         self._tab_index_by_name["建议删除"] = 1
         root.addWidget(self.workspace_tabs, stretch=4)
 
+    def set_theme(self, theme: str) -> None:
+        self._theme = "light" if theme == "light" else "dark"
+        preview_background = QColor("#D7DEE7") if self._theme == "light" else QColor("#090C10")
+        self.video_scene.setBackgroundBrush(preview_background)
+        self.audio_track_widget.set_theme(self._theme)
+        self.video_view.viewport().update()
+
     def attach_workspace_panels(
         self,
         translation_page: QWidget,
@@ -475,26 +560,10 @@ class TimelinePage(QWidget):
         if tab_index is not None:
             self.workspace_tabs.setCurrentIndex(tab_index)
 
-    def load_project(self, project: Project) -> None:
+    def load_project(self, project: Project, settings: AppSettings | None = None) -> None:
         self._loaded_project = project
-        if project.video_path:
-            if project.segments:
-                self.info_label.setText(
-                    f"项目“{project.name}”已完成字幕识别，共 {len(project.segments)} 个分段。"
-                    f" 你可以直接去翻译，也可以单独生成 {len(project.cut_suggestions)} 条删除建议。"
-                )
-            elif project.analysis_completed:
-                self.info_label.setText(
-                    f"项目“{project.name}”已完成识别，但没有检测到可用语音分段。"
-                    " 现在可以直接生成无声/无人声的删除建议。"
-                )
-            else:
-                self.info_label.setText(
-                    f"项目“{project.name}”已导入。先做“识别字幕 / 分段”，之后可单独走翻译或剪辑路线。"
-                )
-        else:
-            self.info_label.setText("请先导入源视频，再开始识别字幕、翻译或生成删除建议。")
-
+        if settings is not None:
+            self.set_preview_subtitle_settings(settings)
         selected_segment_rows = set(self.selected_segment_rows())
         self._loading_segments = True
         self.segments_table.setRowCount(len(project.segments))
@@ -585,6 +654,7 @@ class TimelinePage(QWidget):
             self.clear_selected_suggestion_range()
 
         self.audio_track_widget.set_suggestions(project.cut_suggestions)
+        self._refresh_preview_subtitles()
 
     def _restore_row_selection(self, table: QTableWidget, selected_rows: set[int]) -> None:
         selection_model = table.selectionModel()
@@ -645,8 +715,7 @@ class TimelinePage(QWidget):
 
     def set_preview_enabled(self, enabled: bool) -> None:
         self._preview_available = enabled
-        self.play_button.setEnabled(enabled)
-        self.pause_button.setEnabled(enabled)
+        self.play_pause_button.setEnabled(enabled)
         self.stop_preview_button.setEnabled(enabled)
         self.mute_preview_button.setEnabled(enabled)
         self.preview_volume_slider.setEnabled(enabled)
@@ -662,11 +731,80 @@ class TimelinePage(QWidget):
         self.current_time_label.setText(format_timestamp(position_ms))
         self.total_time_label.setText(format_timestamp(duration_ms))
         self.audio_track_widget.set_playhead(position_ms)
+        self._refresh_preview_subtitles()
+
+    def set_preview_subtitle_settings(self, settings: AppSettings) -> None:
+        export_settings = settings.export
+        self._subtitle_mode = str(getattr(export_settings, "subtitle_mode", "en") or "en")
+        self._subtitle_font_size = max(5, int(getattr(export_settings, "subtitle_font_size", 28) or 28))
+        self._subtitle_chinese_color = self._preview_subtitle_color(
+            getattr(export_settings, "subtitle_chinese_color", "#FFD966"),
+            "#FFD966",
+        )
+        self._subtitle_english_color = self._preview_subtitle_color(
+            getattr(export_settings, "subtitle_english_color", "#FFFFFF"),
+            "#FFFFFF",
+        )
+        self._apply_preview_subtitle_style()
+        self._refresh_preview_subtitles()
+
+    def _preview_subtitle_color(self, value: object, fallback: str) -> QColor:
+        normalized = str(value or "").strip()
+        if normalized and not normalized.startswith("#"):
+            normalized = f"#{normalized}"
+        color = QColor(normalized)
+        return color if color.isValid() else QColor(fallback)
+
+    def _apply_preview_subtitle_style(self) -> None:
+        font = QFont()
+        font.setPixelSize(self._subtitle_font_size)
+        font.setWeight(QFont.Weight.Bold)
+        self.preview_chinese_subtitle_item.setFont(font)
+        self.preview_english_subtitle_item.setFont(font)
+        self.preview_chinese_subtitle_item.setDefaultTextColor(self._subtitle_chinese_color)
+        self.preview_english_subtitle_item.setDefaultTextColor(self._subtitle_english_color)
+        self._layout_preview_scene(self.video_view.viewport().width(), self.video_view.viewport().height())
+
+    def _refresh_preview_subtitles(self) -> None:
+        segments = self._loaded_project.segments if self._loaded_project is not None else []
+        chinese_text, english_text = subtitle_texts_at_position(
+            segments,
+            self._current_preview_ms,
+            self._subtitle_mode,
+        )
+        self.preview_chinese_subtitle_item.setPlainText(chinese_text)
+        self.preview_english_subtitle_item.setPlainText(english_text)
+        self.preview_chinese_subtitle_item.setVisible(bool(chinese_text))
+        self.preview_english_subtitle_item.setVisible(bool(english_text))
+        self._layout_preview_scene(self.video_view.viewport().width(), self.video_view.viewport().height())
+
+    def _layout_preview_scene(self, width: int, height: int) -> None:
+        scene_width = max(1, int(width))
+        scene_height = max(1, int(height))
+        self.video_scene.setSceneRect(0, 0, scene_width, scene_height)
+        self.video_item.setSize(QSizeF(scene_width, scene_height))
+
+        horizontal_margin = min(80, max(24, scene_width // 24))
+        text_width = max(1, scene_width - horizontal_margin * 2)
+        visible_items = [
+            item
+            for item in (
+                self.preview_chinese_subtitle_item,
+                self.preview_english_subtitle_item,
+            )
+            if item.isVisible()
+        ]
+        bottom = scene_height - max(20, scene_height // 18)
+        for item in reversed(visible_items):
+            item.setTextWidth(text_width)
+            item_height = item.boundingRect().height()
+            bottom -= item_height
+            item.setPos(horizontal_margin, bottom)
+            bottom -= 4
 
     def set_preview_playing(self, playing: bool) -> None:
-        self.play_button.setEnabled(self._preview_available and not playing)
-        self.pause_button.setEnabled(self._preview_available)
-        self.pause_button.setText("暂停画面" if playing else "继续预览")
+        self.play_pause_button.setEnabled(self._preview_available)
+        self.play_pause_button.setText("暂停" if playing else "播放")
 
     def set_preview_audio_state(self, volume_percent: int, muted: bool) -> None:
         clamped = max(0, min(int(volume_percent), 100))
@@ -825,14 +963,6 @@ class TranslationPage(QWidget):
         self.save_button.clicked.connect(self.save_requested.emit)
         self.proofread_source_button.clicked.connect(self.proofread_source_requested.emit)
         self.undo_proofread_button.clicked.connect(self.undo_proofread_requested.emit)
-
-        self.status_label = QLabel(
-            "这里可以直接编辑中文和英文列；支持导入 SRT/VTT 字幕。修改中文后会清空旧英文，方便重新翻译。"
-            " 点击“翻译全部片段”时会自动跳过已有英文结果，并把已完成结果及时保存到项目。"
-            " “校正中文字幕”在未选中行时会处理全部片段，选中行时只处理所选片段。"
-        )
-        self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
 
     def load_project(self, project: Project, settings: AppSettings) -> None:
         masked_key = "已配置" if settings.translation.api_key else "缺少 API Key"
@@ -1292,11 +1422,7 @@ class SettingsPage(QWidget):
         title_layout.setSpacing(4)
         header_title = QLabel("设置")
         header_title.setObjectName("settingsHeaderTitle")
-        header_text = QLabel("按分类整理工作区、转写、翻译、配音和导出参数，避免所有选项堆在同一页。")
-        header_text.setObjectName("settingsHeaderText")
-        header_text.setWordWrap(True)
         title_layout.addWidget(header_title)
-        title_layout.addWidget(header_text)
         self.top_save_button = QPushButton("保存设置")
         self.top_reset_button = QPushButton("恢复默认")
         header_layout.addLayout(title_layout, stretch=1)
@@ -1316,9 +1442,6 @@ class SettingsPage(QWidget):
         sidebar_layout.setSpacing(10)
         nav_title = QLabel("分类")
         nav_title.setObjectName("settingsNavTitle")
-        nav_hint = QLabel("像 VS Code 一样按主题浏览设置。")
-        nav_hint.setObjectName("settingsNavHint")
-        nav_hint.setWordWrap(True)
         # Keep navigation separate from the actual form widgets so we can
         # switch sections without duplicating the load/save wiring.
         self.settings_nav = QListWidget()
@@ -1329,7 +1452,6 @@ class SettingsPage(QWidget):
         self.settings_nav.setSpacing(4)
         self.settings_nav.setUniformItemSizes(True)
         sidebar_layout.addWidget(nav_title)
-        sidebar_layout.addWidget(nav_hint)
         sidebar_layout.addWidget(self.settings_nav, stretch=1)
         body_layout.addWidget(sidebar_frame)
 
@@ -1345,6 +1467,10 @@ class SettingsPage(QWidget):
 
         self.workspace_dir_edit = QLineEdit()
         self.temp_dir_edit = QLineEdit()
+        self.theme_mode_combo = QComboBox()
+        self.theme_mode_combo.addItem("跟随系统", "system")
+        self.theme_mode_combo.addItem("深色", "dark")
+        self.theme_mode_combo.addItem("浅色", "light")
         self.auto_save_minutes_spin = QSpinBox()
         self.auto_save_minutes_spin.setRange(1, 60)
         self.recent_projects_limit_spin = QSpinBox()
@@ -1359,6 +1485,7 @@ class SettingsPage(QWidget):
             [
                 ("工作区目录", self.workspace_dir_edit),
                 ("临时目录", self.temp_dir_edit),
+                ("外观主题", self.theme_mode_combo),
                 ("自动保存间隔（分钟）", self.auto_save_minutes_spin),
                 ("最近项目数", self.recent_projects_limit_spin),
                 ("日志级别", self.log_level_combo),
@@ -1403,10 +1530,6 @@ class SettingsPage(QWidget):
             "medium": self.asr_medium_radio,
             "large-v3": self.asr_large_radio,
         }
-        self.asr_model_note = QLabel(
-            "说明：small 适合日常调试和 CPU；medium 更稳一些但更慢；large-v3 精度更高，但加载更慢、占用更大。"
-        )
-        self.asr_model_note.setWordWrap(True)
         self.asr_model_selector = QWidget()
         asr_model_layout = QVBoxLayout(self.asr_model_selector)
         asr_model_layout.setContentsMargins(0, 0, 0, 0)
@@ -1425,7 +1548,6 @@ class SettingsPage(QWidget):
         custom_model_row.addWidget(self.asr_custom_model_edit, stretch=1)
         asr_model_layout.addLayout(top_model_row)
         asr_model_layout.addLayout(custom_model_row)
-        asr_model_layout.addWidget(self.asr_model_note)
         self.asr_small_radio.setChecked(True)
         self.asr_small_radio.toggled.connect(self._sync_asr_model_editor_state)
         self.asr_medium_radio.toggled.connect(self._sync_asr_model_editor_state)
@@ -1549,15 +1671,12 @@ class SettingsPage(QWidget):
         self.tts_retry_spin = QSpinBox()
         self.tts_retry_spin.setRange(0, 10)
         self.tts_preview_text_edit = QPlainTextEdit()
-        self.tts_hint_label = QLabel()
-        self.tts_hint_label.setWordWrap(True)
         self.tts_provider_combo.currentIndexChanged.connect(self._sync_tts_provider_state)
         tts_group = self._build_form_group(
             "TTS",
             [
                 ("提供方", self.tts_provider_combo),
                 ("默认音色", self.tts_default_voice_combo),
-                ("说明", self.tts_hint_label),
                 ("语速", self.tts_rate_spin),
                 ("音量", self.tts_volume_spin),
                 ("采样率", self.tts_sample_rate_spin),
@@ -1614,10 +1733,6 @@ class SettingsPage(QWidget):
             self.export_subtitle_chinese_color_edit,
             self.export_subtitle_chinese_color_button,
         )
-        self.export_subtitle_preview_hint = QLabel(
-            "实时预览当前字幕字号、颜色和中英双语叠放效果。预览区会始终同时显示中英文两行字幕。"
-        )
-        self.export_subtitle_preview_hint.setWordWrap(True)
         self.export_subtitle_preview_surface = QFrame()
         self.export_subtitle_preview_surface.setMinimumHeight(220)
         self.export_subtitle_preview_surface.setStyleSheet(
@@ -1661,7 +1776,6 @@ class SettingsPage(QWidget):
         preview_group = self._build_form_group(
             "字幕预览",
             [
-                ("说明", self.export_subtitle_preview_hint),
                 ("预览", self.export_subtitle_preview_surface),
             ],
         )
@@ -1694,41 +1808,13 @@ class SettingsPage(QWidget):
         self.export_subtitle_english_color_edit.textChanged.connect(self._refresh_export_subtitle_preview)
         self.export_subtitle_chinese_color_edit.textChanged.connect(self._refresh_export_subtitle_preview)
 
-        self._add_settings_section(
-            "常规",
-            "管理工作目录、自动保存和应用日志等基础行为。",
-            [workspace_group],
-        )
-        self._add_settings_section(
-            "媒体",
-            "配置 ffmpeg、默认输出目录和通用媒体编码参数。",
-            [media_group],
-        )
-        self._add_settings_section(
-            "转写",
-            "配置 Whisper 模型、运行设备、本地缓存和 GPU 检测。",
-            [asr_group],
-        )
-        self._add_settings_section(
-            "剪辑",
-            "调整语气词、停顿阈值和自动剪辑的策略强度。",
-            [cutting_group],
-        )
-        self._add_settings_section(
-            "翻译",
-            "管理翻译接口、模型、系统提示词以及代理参数。",
-            [translation_group],
-        )
-        self._add_settings_section(
-            "配音",
-            "设置 TTS 提供方、默认音色、试听文本和重试策略。",
-            [tts_group],
-        )
-        self._add_settings_section(
-            "导出",
-            "整理默认导出格式、字幕方式、响度目标和容器格式。",
-            [export_group, preview_group],
-        )
+        self._add_settings_section("常规", [workspace_group])
+        self._add_settings_section("媒体", [media_group])
+        self._add_settings_section("转写", [asr_group])
+        self._add_settings_section("剪辑", [cutting_group])
+        self._add_settings_section("翻译", [translation_group])
+        self._add_settings_section("配音", [tts_group])
+        self._add_settings_section("导出", [export_group, preview_group])
 
         self.settings_nav.currentRowChanged.connect(self._set_current_settings_section)
         if self.settings_nav.count() > 0:
@@ -1745,14 +1831,13 @@ class SettingsPage(QWidget):
             form.addRow(label, widget)
         return group
 
-    def _add_settings_section(self, title: str, description: str, groups: list[QWidget]) -> None:
+    def _add_settings_section(self, title: str, groups: list[QWidget]) -> None:
         item = QListWidgetItem(title)
-        item.setToolTip(description)
         item.setSizeHint(QSize(0, 44))
         self.settings_nav.addItem(item)
-        self.settings_stack.addWidget(self._build_settings_section_page(title, description, groups))
+        self.settings_stack.addWidget(self._build_settings_section_page(title, groups))
 
-    def _build_settings_section_page(self, title: str, description: str, groups: list[QWidget]) -> QWidget:
+    def _build_settings_section_page(self, title: str, groups: list[QWidget]) -> QWidget:
         # Each category gets its own scroll area so long forms stay contained
         # and the header/sidebar remain fixed while browsing settings.
         scroll = QScrollArea()
@@ -1766,11 +1851,7 @@ class SettingsPage(QWidget):
         layout.setSpacing(16)
         section_title = QLabel(title)
         section_title.setObjectName("settingsSectionTitle")
-        section_text = QLabel(description)
-        section_text.setObjectName("settingsSectionText")
-        section_text.setWordWrap(True)
         layout.addWidget(section_title)
-        layout.addWidget(section_text)
         for group in groups:
             layout.addWidget(group)
         layout.addStretch(1)
@@ -1806,33 +1887,6 @@ class SettingsPage(QWidget):
     def _sync_tts_provider_state(self) -> None:
         provider_type = str(self.tts_provider_combo.currentData() or "").strip()
         self._reload_tts_voice_options(provider_type)
-        if provider_type == "kokoro_local":
-            if kokoro_local_ready():
-                self.tts_hint_label.setText(
-                    "已检测到本地离线 Kokoro 英文音色。推荐默认音色：Bella（温柔女声）。"
-                )
-            else:
-                self.tts_hint_label.setText(
-                    "未检测到离线 Kokoro 资源，请把 sherpa-onnx 和 kokoro 模型放到程序目录下的 models/tts。"
-                )
-        else:
-            english_voice_names = [
-                voice.name for voice in installed_windows_voices() if voice.culture.lower().startswith("en")
-            ]
-            if english_voice_names:
-                if len(english_voice_names) == 1:
-                    self.tts_hint_label.setText(
-                        f"当前仅检测到 1 个英文系统音色（{english_voice_names[0]}）。"
-                        "即使切换男声/女声预设，实际音色仍会比较接近。发布给别的电脑使用时，建议优先改用离线 Kokoro。"
-                    )
-                else:
-                    self.tts_hint_label.setText(
-                        f"当前检测到 {len(english_voice_names)} 个英文系统音色。发布给别的电脑使用时，建议优先改用离线 Kokoro。"
-                    )
-            else:
-                self.tts_hint_label.setText(
-                    "当前没有检测到英文系统音色。如果要跨电脑稳定使用，建议改用离线 Kokoro。"
-                )
 
     def _pick_subtitle_color(self, target_edit: QLineEdit) -> None:
         current_text = target_edit.text().strip()
@@ -1872,6 +1926,13 @@ class SettingsPage(QWidget):
         font_size = max(10, int(self.export_subtitle_font_size_spin.value()))
         chinese_color = self._subtitle_preview_color(self.export_subtitle_chinese_color_edit.text(), "#FFD966")
         english_color = self._subtitle_preview_color(self.export_subtitle_english_color_edit.text(), "#FFFFFF")
+        subtitle_mode = str(self.export_subtitle_mode_combo.currentData() or "en")
+
+        self.export_subtitle_preview_chinese_label.setVisible(subtitle_mode == "bilingual")
+        self.export_subtitle_preview_english_label.setVisible(True)
+        self.export_subtitle_preview_badge.setText(
+            "中英字幕预览" if subtitle_mode == "bilingual" else "英文字幕预览"
+        )
 
         self.export_subtitle_preview_chinese_label.setStyleSheet(
             "QLabel {"
@@ -1892,9 +1953,32 @@ class SettingsPage(QWidget):
             "}"
         )
 
+    def set_theme(self, theme: str) -> None:
+        is_light = theme == "light"
+        background = "#D7DEE7" if is_light else "#0B1016"
+        border = "#B8C4D1" if is_light else "#2C3440"
+        self.export_subtitle_preview_surface.setStyleSheet(
+            "QFrame {"
+            f"border: 1px solid {border};"
+            "border-radius: 12px;"
+            f"background: {background};"
+            "}"
+        )
+        self.export_subtitle_preview_badge.setStyleSheet(
+            "QLabel {"
+            "padding: 4px 10px;"
+            "border-radius: 999px;"
+            "background: rgba(15, 23, 42, 175);"
+            "color: #F8FAFC;"
+            "font-weight: 600;"
+            "}"
+        )
+        self._refresh_export_subtitle_preview()
+
     def load_settings(self, settings: AppSettings) -> None:
         self.workspace_dir_edit.setText(settings.workspace.workspace_dir)
         self.temp_dir_edit.setText(settings.workspace.temp_dir)
+        set_combo_value(self.theme_mode_combo, settings.workspace.theme_mode)
         self.auto_save_minutes_spin.setValue(settings.workspace.auto_save_minutes)
         self.recent_projects_limit_spin.setValue(settings.workspace.recent_projects_limit)
         set_combo_value(self.log_level_combo, settings.workspace.log_level)
@@ -1977,6 +2061,7 @@ class SettingsPage(QWidget):
                 "workspace": {
                     "workspace_dir": self.workspace_dir_edit.text().strip(),
                     "temp_dir": self.temp_dir_edit.text().strip(),
+                    "theme_mode": self.theme_mode_combo.currentData() or "system",
                     "auto_save_minutes": self.auto_save_minutes_spin.value(),
                     "recent_projects_limit": self.recent_projects_limit_spin.value(),
                     "log_level": self.log_level_combo.currentData() or self.log_level_combo.currentText(),
