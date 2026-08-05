@@ -4,6 +4,7 @@ import ast
 import json
 import re
 import socket
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,30 @@ from urllib.parse import urlparse
 from ..settings import TranslationSettings
 
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*([\[{].*?[\]}])\s*```", re.DOTALL | re.IGNORECASE)
+
+
+# HTTP status codes that are deterministic client errors: retrying cannot help.
+NON_RETRYABLE_HTTP_CODES = frozenset({400, 401, 403, 404, 405, 422})
+_RETRY_BASE_DELAY_SECONDS = 1.0
+_RETRY_MAX_DELAY_SECONDS = 8.0
+_RETRY_AFTER_CAP_SECONDS = 60.0
+
+
+def _retry_delay_seconds(attempt: int, retry_after_seconds: float | None = None) -> float:
+    """Exponential backoff with a cap; honors the server's Retry-After header when present."""
+    if retry_after_seconds is not None:
+        return min(max(0.0, retry_after_seconds), _RETRY_AFTER_CAP_SECONDS)
+    return min(_RETRY_BASE_DELAY_SECONDS * (2 ** attempt), _RETRY_MAX_DELAY_SECONDS)
+
+
+def _retry_after_seconds(exc: error.HTTPError) -> float | None:
+    raw_value = exc.headers.get("Retry-After") if exc.headers is not None else None
+    if not raw_value:
+        return None
+    try:
+        return float(raw_value.strip())
+    except (TypeError, ValueError):
+        return None
 
 
 class TranslationProviderError(RuntimeError):
@@ -102,8 +127,19 @@ def proxy_configuration(
     no_proxy: str,
     target_url: str,
 ) -> dict[str, str] | None:
-    if not proxy_enabled or should_bypass_proxy(target_url, no_proxy):
+    """Return a ProxyHandler map for the request opener.
+
+    - `None` means "default opener": lets urllib honor system / environment
+      proxies. This is used whenever proxy mode is NOT enabled, so a user who
+      relies on the OS default proxy keeps working without extra config.
+    - `{}` (empty dict) means "no proxy for this host": only used when the
+      target URL matches the no_proxy rules, so that host is reached directly.
+    - A non-empty dict routes through the configured proxy addresses.
+    """
+    if not proxy_enabled:
         return None
+    if should_bypass_proxy(target_url, no_proxy):
+        return {}
 
     proxy_map: dict[str, str] = {}
     normalized_http = http_proxy.strip()
@@ -179,11 +215,23 @@ def proofread_request_payload(
 
 def _friendly_http_error_message(status_code: int, error_body: str, fallback_reason: str) -> str:
     normalized_body = error_body.lower()
+    if status_code == 401:
+        return (
+            "翻译接口认证失败（401）：API Key 无效或已过期。"
+            "请在“设置 → 翻译”里检查/更新 API Key，或在服务商后台确认账号状态与余额。\n"
+            f"接口返回：{error_body or fallback_reason}"
+        )
     if status_code == 403 and "1010" in normalized_body:
         return (
             "翻译接口被目标站点的 Cloudflare/WAF 拦截了（1010 Access Denied）。"
             "这通常不是模型名填写错误，而是对方站点拦截了当前客户端或网络。"
             "请联系该接口服务商放行你的公网 IP，或关闭 API 路径上的 Browser Integrity Check / WAF 规则。"
+        )
+    if status_code == 403:
+        return (
+            "翻译接口拒绝了本次请求（403 Forbidden）。"
+            "请检查 API Key 权限是否覆盖所选模型，或确认该接口是否允许当前用量/路径。\n"
+            f"接口返回：{error_body or fallback_reason}"
         )
     return f"HTTP {status_code} from translation provider: {error_body or fallback_reason}"
 
@@ -446,10 +494,14 @@ class OpenAICompatibleTranslationProvider(BaseTranslationProvider):
             no_proxy=self.no_proxy,
             target_url=endpoint,
         )
+        # `proxies == {}` disables proxying entirely; `None` keeps the default
+        # opener (environment-variable proxies).
         opener = request.build_opener(request.ProxyHandler(proxies)) if proxies is not None else None
 
         last_error: Exception | None = None
-        for _attempt in range(self.max_retries + 1):
+        for attempt in range(self.max_retries + 1):
+            retryable = True
+            delay_seconds = _retry_delay_seconds(attempt)
             try:
                 if opener is None:
                     response_context = request.urlopen(request_obj, timeout=self.timeout_sec)
@@ -460,9 +512,16 @@ class OpenAICompatibleTranslationProvider(BaseTranslationProvider):
                     return json.loads(text)
             except error.HTTPError as exc:
                 error_body = exc.read().decode("utf-8", errors="replace")
+                exc.close()
                 last_error = TranslationProviderError(
                     _friendly_http_error_message(exc.code, error_body, str(exc.reason))
                 )
+                if exc.code in NON_RETRYABLE_HTTP_CODES:
+                    retryable = False
+                else:
+                    # 429 (rate-limited) and 5xx responses are worth retrying
+                    # with backoff; honor Retry-After when provided.
+                    delay_seconds = _retry_delay_seconds(attempt, _retry_after_seconds(exc))
             except error.URLError as exc:
                 if _is_timeout_reason(exc.reason):
                     last_error = TranslationProviderError(
@@ -481,6 +540,9 @@ class OpenAICompatibleTranslationProvider(BaseTranslationProvider):
                     last_error = TranslationProviderError(f"翻译接口请求失败：{exc}")
             except json.JSONDecodeError as exc:
                 last_error = TranslationProviderError(f"无法解析翻译接口返回的 JSON：{exc}")
+            if not retryable or attempt >= self.max_retries:
+                break
+            time.sleep(delay_seconds)
         raise last_error or TranslationProviderError("Translation request failed.")
 
     def _request_model_text(self, payload: dict[str, Any]) -> str:

@@ -8,6 +8,7 @@ from vcut_studio.providers.translation import (
     _friendly_http_error_message,
     _friendly_timeout_error_message,
     _is_timeout_reason,
+    _retry_delay_seconds,
     extract_json_object,
     parse_proofread_response,
     parse_translation_response,
@@ -118,7 +119,7 @@ class TranslationProviderHelperTests(unittest.TestCase):
             },
         )
 
-    def test_proxy_configuration_returns_none_when_bypassed(self) -> None:
+    def test_proxy_configuration_returns_empty_map_when_bypassed(self) -> None:
         proxy_map = proxy_configuration(
             proxy_enabled=True,
             http_proxy="http://127.0.0.1:7890",
@@ -126,12 +127,59 @@ class TranslationProviderHelperTests(unittest.TestCase):
             no_proxy=".openai.com",
             target_url="https://api.openai.com/v1/chat/completions",
         )
+        # Bypassing means "no proxy at all": an empty map disables proxying
+        # (including environment-variable proxies).
+        self.assertEqual(proxy_map, {})
+
+    def test_proxy_configuration_disabled_returns_none(self) -> None:
+        proxy_map = proxy_configuration(
+            proxy_enabled=False,
+            http_proxy="http://127.0.0.1:7890",
+            https_proxy="http://127.0.0.1:7890",
+            no_proxy="",
+            target_url="https://api.openai.com/v1/chat/completions",
+        )
+        # Proxy mode off -> default opener, which honors system/environment
+        # proxies (so a user relying on the OS default proxy still connects).
         self.assertIsNone(proxy_map)
+
+    def test_proxy_configuration_enabled_without_addresses_returns_none(self) -> None:
+        proxy_map = proxy_configuration(
+            proxy_enabled=True,
+            http_proxy="",
+            https_proxy="",
+            no_proxy="",
+            target_url="https://api.openai.com/v1/chat/completions",
+        )
+        # None keeps the default opener, which honors environment proxies.
+        self.assertIsNone(proxy_map)
+
+    def test_retry_delay_seconds_exponential_backoff_with_cap(self) -> None:
+        self.assertEqual(_retry_delay_seconds(0), 1.0)
+        self.assertEqual(_retry_delay_seconds(1), 2.0)
+        self.assertEqual(_retry_delay_seconds(2), 4.0)
+        # Large attempts hit the cap instead of exploding.
+        self.assertEqual(_retry_delay_seconds(20), 8.0)
+
+    def test_retry_delay_seconds_honors_retry_after(self) -> None:
+        self.assertEqual(_retry_delay_seconds(0, retry_after_seconds=3.5), 3.5)
+        self.assertEqual(_retry_delay_seconds(0, retry_after_seconds=999), 60.0)
+        self.assertEqual(_retry_delay_seconds(0, retry_after_seconds=-1), 0.0)
 
     def test_friendly_http_error_message_for_cloudflare_1010(self) -> None:
         message = _friendly_http_error_message(403, "error code: 1010", "Forbidden")
         self.assertIn("Cloudflare/WAF", message)
         self.assertIn("1010", message)
+
+    def test_friendly_http_error_message_for_401_mentions_api_key(self) -> None:
+        message = _friendly_http_error_message(401, "Your api key is invalid", "Unauthorized")
+        self.assertIn("401", message)
+        self.assertIn("API Key", message)
+
+    def test_friendly_http_error_message_for_generic_403(self) -> None:
+        message = _friendly_http_error_message(403, "insufficient permissions", "Forbidden")
+        self.assertIn("403", message)
+        self.assertNotIn("1010", message)
 
     def test_is_timeout_reason_detects_python_timeout_text(self) -> None:
         self.assertTrue(_is_timeout_reason("The read operation timed out"))

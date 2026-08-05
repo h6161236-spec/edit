@@ -16,6 +16,11 @@ release/
 tmp_*.wav
 *.tar.bz2
 
+# Settings may contain API keys; never commit them.
+settings.json
+*.key
+*.secret
+
 # Large local runtime assets; keep them on disk, but do not commit them.
 models/
 

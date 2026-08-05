@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import tempfile
 import wave
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .background import BackgroundTaskCancelled
 from .media import resolve_ffmpeg_path
 from .models import CutSuggestion, Project
 from .process_utils import subprocess_windowless_kwargs
@@ -120,12 +122,34 @@ def _controller_detach_process(
         detach_process(process)
 
 
+def _controller_is_cancel_requested(controller: object | None) -> bool:
+    if controller is None:
+        return False
+    is_cancel_requested = getattr(controller, "is_cancel_requested", None)
+    if callable(is_cancel_requested):
+        return bool(is_cancel_requested())
+    return False
+
+
+# ffmpeg long renders (e.g. re-encoding a 1-hour video) legitimately take a
+# while; the timeout only guards against hung processes, not slow work.
+_DEFAULT_COMMAND_TIMEOUT_SECONDS = 4 * 60 * 60
+
+
 def _run_command(
     command: list[str],
     error_message: str,
     controller: object | None = None,
+    *,
+    timeout_sec: float | None = _DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    cleanup_paths: list[Path] | None = None,
 ) -> tuple[str, str]:
     _controller_checkpoint(controller)
+    if not _command_executable_available(command[0]):
+        raise ExportError(
+            f"找不到可执行文件：{command[0]}。请确认 ffmpeg 已安装并在 PATH 中，"
+            "或在设置中指定 ffmpeg 的完整路径。"
+        )
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -137,15 +161,64 @@ def _run_command(
     )
     _controller_attach_process(controller, process)
     try:
-        stdout_text, stderr_text = process.communicate()
+        try:
+            stdout_text, stderr_text = process.communicate(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                stdout_text, stderr_text = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout_text, stderr_text = process.communicate()
+            _cleanup_partial_outputs(cleanup_paths)
+            stderr_tail = "\n".join((stderr_text or "").strip().splitlines()[-12:])
+            raise ExportError(
+                f"命令执行超时（超过 {timeout_sec:g} 秒）：{error_message}"
+                + (f"\n{stderr_tail}" if stderr_tail else "")
+            )
     finally:
         _controller_detach_process(controller, process)
     _controller_checkpoint(controller)
 
     if process.returncode != 0:
+        # A cancelled task kills the process, which makes returncode non-zero;
+        # report it as a cancellation, not a failure.
+        if _controller_is_cancel_requested(controller):
+            _cleanup_partial_outputs(cleanup_paths)
+            raise BackgroundTaskCancelled("已终止当前后台任务。")
+        _cleanup_partial_outputs(cleanup_paths)
         stderr_tail = "\n".join((stderr_text or "").strip().splitlines()[-12:])
         raise ExportError(stderr_tail or error_message)
     return (stdout_text or "", stderr_text or "")
+
+
+def _cleanup_partial_outputs(paths: list[Path] | None) -> None:
+    """Remove half-written output files left behind by a failed/cancelled render."""
+    if not paths:
+        return
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _command_executable_available(executable: str) -> bool:
+    """Check whether a command's executable exists before spawning it.
+
+    Bare names (e.g. `ffmpeg`) are resolved through PATH; explicit paths are
+    checked directly. Returns True when unknown so callers keep control of
+    their own error reporting.
+    """
+    if not executable:
+        return False
+    if executable.startswith(("./", "../", "/", "\\")) or ":" in executable or "\\" in executable:
+        return Path(executable).is_file()
+    if shutil.which(executable) is not None:
+        return True
+    # Not resolvable now — let Popen raise its own FileNotFoundError so the
+    # caller's original error path stays intact.
+    return True
 
 
 def _clamp(value: int, lower: int, upper: int) -> int:
@@ -283,7 +356,12 @@ def render_keep_ranges_to_video(
     command.append(str(output_path))
 
     try:
-        _run_command(command, "ffmpeg export failed.", controller=controller)
+        _run_command(
+            command,
+            "ffmpeg export failed.",
+            controller=controller,
+            cleanup_paths=[output_path],
+        )
     finally:
         try:
             script_path.unlink(missing_ok=True)
@@ -767,7 +845,12 @@ def render_video_with_subtitles(
         if has_audio:
             command.extend(["-c:a", "copy"])
         command.extend(["-c:s", subtitle_codec_for_container(container), str(destination)])
-    _run_command(command, "Subtitle export failed.", controller=controller)
+    _run_command(
+        command,
+        "Subtitle export failed.",
+        controller=controller,
+        cleanup_paths=[output_path],
+    )
     return destination
 
 
@@ -805,7 +888,12 @@ def render_video_with_audio_track(
         "-shortest",
         str(destination),
     ]
-    _run_command(command, "English dub export failed.", controller=controller)
+    _run_command(
+        command,
+        "English dub export failed.",
+        controller=controller,
+        cleanup_paths=[output_path],
+    )
     return destination
 
 
@@ -870,7 +958,12 @@ def render_stretched_video(
     ]
 
     try:
-        _run_command(command, "English video stretch export failed.", controller=controller)
+        _run_command(
+            command,
+            "English video stretch export failed.",
+            controller=controller,
+            cleanup_paths=[output_path],
+        )
     finally:
         try:
             script_path.unlink(missing_ok=True)
@@ -1031,6 +1124,21 @@ def build_atempo_filters(source_duration_ms: int, target_duration_ms: int) -> li
     return filters
 
 
+def _is_valid_wav_file(path: Path) -> bool:
+    """Cheap sanity check that a cached dub file is a real, non-empty WAV.
+
+    Guards against reusing a truncated/corrupted cache entry as if it were a
+    usable dub clip.
+    """
+    try:
+        if path.stat().st_size < 44:  # smallest valid RIFF/WAVE header
+            return False
+        with wave.open(str(path), "rb") as wav_file:
+            return wav_file.getnframes() > 0
+    except (OSError, wave.Error):
+        return False
+
+
 def can_reuse_segment_dub(segment: object, voice_id: str, rate: float, text: str) -> Path | None:
     dub_audio_path = str(getattr(segment, "dub_audio_path", "") or "").strip()
     if not dub_audio_path:
@@ -1046,6 +1154,8 @@ def can_reuse_segment_dub(segment: object, voice_id: str, rate: float, text: str
     if dub_text != text.strip():
         return None
     if dub_rate is None or abs(float(dub_rate) - float(rate)) > 0.001:
+        return None
+    if not _is_valid_wav_file(candidate):
         return None
     return candidate
 
@@ -1163,7 +1273,12 @@ def render_english_dub_audio(
     )
 
     try:
-        _run_command(command, "English dub audio rendering failed.", controller=controller)
+        _run_command(
+            command,
+            "English dub audio rendering failed.",
+            controller=controller,
+            cleanup_paths=[output_path],
+        )
     finally:
         try:
             script_path.unlink(missing_ok=True)

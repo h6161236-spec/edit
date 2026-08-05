@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from ..background import BackgroundTaskCancelled
 from ..process_utils import subprocess_windowless_kwargs
 from ..runtime_assets import (
     find_kokoro_model_dir,
@@ -91,6 +92,15 @@ def _controller_checkpoint(controller: object | None) -> None:
         checkpoint()
 
 
+def _controller_is_cancel_requested(controller: object | None) -> bool:
+    if controller is None:
+        return False
+    is_cancel_requested = getattr(controller, "is_cancel_requested", None)
+    if callable(is_cancel_requested):
+        return bool(is_cancel_requested())
+    return False
+
+
 def _controller_attach_process(
     controller: object | None,
     process: subprocess.Popen[str],
@@ -141,6 +151,10 @@ def _run_command(
     _controller_checkpoint(controller)
 
     if process.returncode != 0:
+        # A cancelled task kills the process, which makes returncode non-zero;
+        # report it as a cancellation, not a failure.
+        if _controller_is_cancel_requested(controller):
+            raise BackgroundTaskCancelled("已终止当前后台任务。")
         cleaned_stderr = _decode_powershell_clixml(stderr_text or "")
         stderr_tail = "\n".join((cleaned_stderr or "").strip().splitlines()[-12:])
         raise TTSProviderError(stderr_tail or error_message)

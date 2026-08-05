@@ -4,6 +4,8 @@ import json
 import os
 import re
 import sys
+import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,68 @@ def _normalize_hex_color(value: Any, fallback: str) -> str:
     return fallback
 
 
+def _as_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Convert a raw JSON value to int, falling back to `default` on any failure.
+
+    `minimum`/`maximum` clamp the parsed value so corrupted or hand-edited
+    settings cannot crash or misbehave the app (e.g. negative timeouts).
+    """
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def _as_float(
+    value: Any,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    """Convert a raw JSON value to float, falling back to `default` on failure."""
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    """Convert a raw JSON value to bool, tolerating string literals.
+
+    Fixes the classic `bool("false") == True` trap: JSON files hand-edited with
+    string values like "false" / "0" now parse to False instead of True.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off", ""):
+            return False
+        return True
+    if value is None:
+        return default
+    return bool(value)
+
+
 def _portable_settings_path() -> Path | None:
     if not getattr(sys, "frozen", False):
         return None
@@ -93,8 +157,8 @@ class WorkspaceSettings:
         return cls(
             workspace_dir=str(data.get("workspace_dir", _default_workspace_dir())),
             temp_dir=str(data.get("temp_dir", _default_temp_dir())),
-            auto_save_minutes=int(data.get("auto_save_minutes", 3)),
-            recent_projects_limit=int(data.get("recent_projects_limit", 10)),
+            auto_save_minutes=_as_int(data.get("auto_save_minutes", 3), 3, minimum=1, maximum=720),
+            recent_projects_limit=_as_int(data.get("recent_projects_limit", 10), 10, minimum=0, maximum=100),
             log_level=str(data.get("log_level", "INFO")),
         )
 
@@ -113,7 +177,7 @@ class MediaSettings:
         return cls(
             ffmpeg_path=str(data.get("ffmpeg_path", "ffmpeg")),
             default_output_dir=str(data.get("default_output_dir", _default_output_dir())),
-            overwrite_existing=bool(data.get("overwrite_existing", False)),
+            overwrite_existing=_as_bool(data.get("overwrite_existing", False), False),
             video_codec=str(data.get("video_codec", "libx264")),
             audio_codec=str(data.get("audio_codec", "aac")),
             quality_preset=str(data.get("quality_preset", "medium")),
@@ -138,12 +202,12 @@ class ASRSettings:
             model_name=str(data.get("model_name", "small")),
             device=str(data.get("device", "cpu")),
             language=str(data.get("language", "zh")),
-            vad_enabled=bool(data.get("vad_enabled", True)),
-            segment_max_seconds=int(data.get("segment_max_seconds", 25)),
-            min_confidence=float(data.get("min_confidence", 0.55)),
+            vad_enabled=_as_bool(data.get("vad_enabled", True), True),
+            segment_max_seconds=_as_int(data.get("segment_max_seconds", 25), 25, minimum=1, maximum=600),
+            min_confidence=_as_float(data.get("min_confidence", 0.55), 0.55, minimum=0.0, maximum=1.0),
             model_cache_dir=str(data.get("model_cache_dir", _default_asr_cache_dir())),
             local_model_dir=str(data.get("local_model_dir", "")),
-            local_files_only=bool(data.get("local_files_only", False)),
+            local_files_only=_as_bool(data.get("local_files_only", False), False),
         )
 
 
@@ -182,11 +246,11 @@ class CuttingSettings:
         )
         return cls(
             filler_words=[str(word) for word in words],
-            pause_threshold_ms=int(data.get("pause_threshold_ms", 550)),
-            cut_padding_ms=int(data.get("cut_padding_ms", 90)),
-            merge_gap_ms=int(data.get("merge_gap_ms", 120)),
+            pause_threshold_ms=_as_int(data.get("pause_threshold_ms", 550), 550, minimum=1, maximum=60_000),
+            cut_padding_ms=_as_int(data.get("cut_padding_ms", 90), 90, minimum=0, maximum=10_000),
+            merge_gap_ms=_as_int(data.get("merge_gap_ms", 120), 120, minimum=0, maximum=60_000),
             mode=str(data.get("mode", "standard")),
-            preserve_intro_pause=bool(data.get("preserve_intro_pause", True)),
+            preserve_intro_pause=_as_bool(data.get("preserve_intro_pause", True), True),
         )
 
 
@@ -214,11 +278,11 @@ class TranslationSettings:
             api_key=str(data.get("api_key", "")),
             model=str(data.get("model", "")),
             system_prompt=str(data.get("system_prompt", DEFAULT_TRANSLATION_SYSTEM_PROMPT)),
-            timeout_sec=int(data.get("timeout_sec", 180)),
-            max_retries=int(data.get("max_retries", 3)),
-            concurrency=int(data.get("concurrency", 2)),
-            batch_size=int(data.get("batch_size", 2)),
-            proxy_enabled=bool(data.get("proxy_enabled", False)),
+            timeout_sec=_as_int(data.get("timeout_sec", 180), 180, minimum=1, maximum=3600),
+            max_retries=_as_int(data.get("max_retries", 3), 3, minimum=0, maximum=20),
+            concurrency=_as_int(data.get("concurrency", 2), 2, minimum=1, maximum=64),
+            batch_size=_as_int(data.get("batch_size", 2), 2, minimum=1, maximum=64),
+            proxy_enabled=_as_bool(data.get("proxy_enabled", False), False),
             http_proxy=str(data.get("http_proxy", "")),
             https_proxy=str(data.get("https_proxy", "")),
             no_proxy=str(data.get("no_proxy", "")),
@@ -241,10 +305,10 @@ class TTSSettings:
         return cls(
             provider_type=provider_type,
             default_voice=str(data.get("default_voice", _default_tts_voice(provider_type))),
-            rate=float(data.get("rate", 1.0)),
-            volume=float(data.get("volume", 1.0)),
-            sample_rate=int(data.get("sample_rate", 22050)),
-            retry_count=int(data.get("retry_count", 2)),
+            rate=_as_float(data.get("rate", 1.0), 1.0, minimum=0.25, maximum=4.0),
+            volume=_as_float(data.get("volume", 1.0), 1.0, minimum=0.0, maximum=2.0),
+            sample_rate=_as_int(data.get("sample_rate", 22050), 22050, minimum=8000, maximum=192_000),
+            retry_count=_as_int(data.get("retry_count", 2), 2, minimum=0, maximum=20),
             preview_text=str(
                 data.get(
                     "preview_text",
@@ -271,7 +335,7 @@ class ExportSettings:
         return cls(
             default_export_type=str(data.get("default_export_type", "clean_zh")),
             subtitle_mode=str(data.get("subtitle_mode", "en")),
-            subtitle_font_size=max(1, int(data.get("subtitle_font_size", 28))),
+            subtitle_font_size=_as_int(data.get("subtitle_font_size", 28), 28, minimum=1, maximum=128),
             subtitle_english_color=_normalize_hex_color(
                 data.get("subtitle_english_color", _DEFAULT_SUBTITLE_ENGLISH_COLOR),
                 _DEFAULT_SUBTITLE_ENGLISH_COLOR,
@@ -280,9 +344,9 @@ class ExportSettings:
                 data.get("subtitle_chinese_color", _DEFAULT_SUBTITLE_CHINESE_COLOR),
                 _DEFAULT_SUBTITLE_CHINESE_COLOR,
             ),
-            burn_subtitles=bool(data.get("burn_subtitles", True)),
-            export_sidecar_srt=bool(data.get("export_sidecar_srt", True)),
-            audio_lufs_target=int(data.get("audio_lufs_target", -16)),
+            burn_subtitles=_as_bool(data.get("burn_subtitles", True), True),
+            export_sidecar_srt=_as_bool(data.get("export_sidecar_srt", True), True),
+            audio_lufs_target=_as_int(data.get("audio_lufs_target", -16), -16, minimum=-70, maximum=0),
             output_container=str(data.get("output_container", "mp4")),
         )
 
@@ -332,7 +396,22 @@ class SettingsStore:
             settings = AppSettings()
             self.save(settings)
             return settings
-        data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        try:
+            raw_text = self.settings_path.read_text(encoding="utf-8")
+            data = json.loads(raw_text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            # A corrupted or partially-written settings file must not prevent
+            # the app from starting. Preserve the broken file for diagnosis and
+            # fall back to defaults.
+            self._backup_corrupted_settings(exc)
+            settings = AppSettings()
+            self.save(settings)
+            return settings
+        if not isinstance(data, dict):
+            self._backup_corrupted_settings("settings root is not a JSON object")
+            settings = AppSettings()
+            self.save(settings)
+            return settings
         settings = AppSettings.from_dict(data)
         legacy_builtin_voices = {"", "emma_clear", "oliver_story", "maya_bright", "henry_anchor"}
         if (
@@ -347,5 +426,36 @@ class SettingsStore:
     def save(self, settings: AppSettings) -> Path:
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(settings.to_dict(), indent=2, ensure_ascii=False)
-        self.settings_path.write_text(payload, encoding="utf-8")
+        # Atomic write: write to a temp file in the same directory, then rename,
+        # so a crash mid-write cannot corrupt the settings file.
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(self.settings_path.parent),
+                prefix=self.settings_path.name + ".",
+                suffix=".tmp",
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+                temp_file.write(payload)
+            os.replace(str(temp_path), str(self.settings_path))
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         return self.settings_path
+
+    def _backup_corrupted_settings(self, reason: object) -> Path | None:
+        """Move a corrupted settings file aside so it can be inspected later."""
+        try:
+            backup_path = self.settings_path.with_name(
+                self.settings_path.name + ".corrupted." + time.strftime("%Y%m%d-%H%M%S")
+            )
+            os.replace(str(self.settings_path), str(backup_path))
+            return backup_path
+        except OSError:
+            return None

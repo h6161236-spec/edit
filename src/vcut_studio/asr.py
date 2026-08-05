@@ -16,6 +16,44 @@ from .process_utils import subprocess_windowless_kwargs
 from .runtime_assets import prepare_ascii_safe_runtime_path
 from .settings import ASRSettings
 
+# Process-wide Whisper model cache: loading a medium/large model takes tens of
+# seconds to minutes on CPU, and re-loading it for every analysis task is
+# wasteful. The app runs one background task at a time, so sharing a single
+# model instance across tasks is safe (faster-whisper models are not designed
+# for concurrent transcription, but tasks never overlap here).
+_MODEL_CACHE: dict[tuple[str, str, str, str, bool], object] = {}
+_MODEL_CACHE_LOCK = threading.Lock()
+
+
+def _cached_whisper_model(
+    whisper_model_factory: object,
+    model_reference: str,
+    device: str,
+    compute_type: str,
+    download_root: str | None,
+    local_files_only: bool,
+) -> object:
+    key = (
+        model_reference,
+        device,
+        compute_type,
+        str(download_root or ""),
+        local_files_only,
+    )
+    with _MODEL_CACHE_LOCK:
+        cached = _MODEL_CACHE.get(key)
+        if cached is not None:
+            return cached
+        model = whisper_model_factory(  # type: ignore[operator]
+            model_reference,
+            device=device,
+            compute_type=compute_type,
+            download_root=download_root,
+            local_files_only=local_files_only,
+        )
+        _MODEL_CACHE[key] = model
+        return model
+
 try:  # pragma: no cover - optional runtime dependency
     from opencc import OpenCC
 except ImportError:  # pragma: no cover - optional runtime dependency
@@ -339,7 +377,8 @@ class FasterWhisperTranscriber:
 
         def _load_model() -> None:
             try:
-                model_holder["model"] = whisper_model_factory(
+                model_holder["model"] = _cached_whisper_model(
+                    whisper_model_factory,
                     self._model_reference(),
                     device=resolved_device,
                     compute_type=self._compute_type(resolved_device),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QRectF, QSize, QTime, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
 
 from ..models import Project
 from ..providers.tts import (
-    all_tts_voices,
     available_tts_voices,
     installed_windows_voices,
     kokoro_local_ready,
@@ -48,6 +47,20 @@ from ..providers.tts import (
     tts_provider_display_name,
 )
 from ..settings import AppSettings
+from .pages_formatting import (
+    build_inline_row,
+    configure_resizable_columns,
+    format_internal_status,
+    format_suggestion_reason,
+    format_suggestion_type,
+    format_timestamp,
+    format_voice_label,
+    qtime_to_timestamp,
+    segment_overlap_ms,
+    set_combo_value,
+    suggestion_filter_matches,
+    timestamp_to_qtime,
+)
 from .dubbing_logic import (
     build_dubbing_summary_text,
     dub_review_status,
@@ -64,134 +77,6 @@ DUB_MISSING_COLOR = QColor("#242b35")
 DUB_GENERATING_COLOR = QColor("#1d3142")
 
 
-def format_timestamp(ms: int) -> str:
-    total_ms = max(0, ms)
-    hours, remainder = divmod(total_ms, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds, milliseconds = divmod(remainder, 1_000)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
-
-
-def timestamp_to_qtime(ms: int) -> QTime:
-    total_ms = max(0, int(ms))
-    hours, remainder = divmod(total_ms, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds, milliseconds = divmod(remainder, 1_000)
-    return QTime(hours % 24, minutes, seconds, milliseconds)
-
-
-def qtime_to_timestamp(value: QTime) -> int:
-    return max(0, value.msecsSinceStartOfDay())
-
-
-def set_combo_value(combo: QComboBox, value: str) -> None:
-    index = combo.findData(value)
-    if index < 0:
-        index = combo.findText(value)
-    if index >= 0:
-        combo.setCurrentIndex(index)
-    elif combo.isEditable():
-        combo.setEditText(value)
-
-
-def configure_resizable_columns(table: QTableWidget, widths: list[int]) -> None:
-    header = table.horizontalHeader()
-    header.setStretchLastSection(False)
-    header.setMinimumSectionSize(72)
-    header.setCascadingSectionResizes(False)
-    for column_index in range(table.columnCount()):
-        header.setSectionResizeMode(column_index, QHeaderView.ResizeMode.Interactive)
-        if column_index < len(widths):
-            table.setColumnWidth(column_index, widths[column_index])
-
-
-def build_inline_row(*widgets: QWidget) -> QWidget:
-    container = QWidget()
-    layout = QHBoxLayout(container)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(6)
-    for widget in widgets:
-        layout.addWidget(widget)
-    return container
-
-
-def format_suggestion_reason(reason: str, details: str) -> str:
-    if reason == "filler_word":
-        return f"语气词：{details}" if details else "语气词"
-    if reason == "long_pause":
-        return f"长停顿：{details}" if details else "长停顿"
-    if reason == "silent_range":
-        return f"无声/无人声：{details}" if details else "无声/无人声"
-    return details or reason
-
-
-def format_suggestion_type(reason: str) -> str:
-    if reason == "filler_word":
-        return "口癖"
-    if reason == "long_pause":
-        return "停顿"
-    if reason == "silent_range":
-        return "无声/无人声"
-    return "其他"
-
-
-def suggestion_filter_matches(reason: str, filter_value: str) -> bool:
-    normalized = str(filter_value or "").strip().lower()
-    if normalized in {"", "all"}:
-        return True
-    return reason == normalized
-
-
-def format_internal_status(status: str) -> str:
-    status_map = {
-        "pending": "待处理",
-        "translated": "已翻译",
-        "edited": "已编辑",
-        "completed": "已完成",
-        "failed": "失败",
-        "generating": "生成中",
-    }
-    return status_map.get(status, status)
-
-
-def format_voice_label(voice_id: str | None) -> str:
-    normalized = (voice_id or "").strip()
-    if not normalized:
-        return "未指定"
-    for voice in all_tts_voices():
-        if voice.voice_id == normalized:
-            return voice.label
-    if normalized.startswith("system:"):
-        return normalized.split(":", 1)[1].strip() or normalized
-    return normalized
-
-
-def _segment_overlap_ms(start_ms: int, end_ms: int, suggestions: list[object]) -> int:
-    accepted_ranges = [
-        (max(0, int(getattr(suggestion, "start_ms", 0))), max(0, int(getattr(suggestion, "end_ms", 0))))
-        for suggestion in suggestions
-        if bool(getattr(suggestion, "accepted", False))
-    ]
-    accepted_ranges = [(start, end) for start, end in accepted_ranges if end > start]
-    if not accepted_ranges:
-        return 0
-
-    accepted_ranges.sort(key=lambda item: (item[0], item[1]))
-    merged: list[tuple[int, int]] = []
-    for range_start, range_end in accepted_ranges:
-        if not merged or range_start > merged[-1][1]:
-            merged.append((range_start, range_end))
-        else:
-            previous_start, previous_end = merged[-1]
-            merged[-1] = (previous_start, max(previous_end, range_end))
-
-    overlap_ms = 0
-    for range_start, range_end in merged:
-        overlap_start = max(start_ms, range_start)
-        overlap_end = min(end_ms, range_end)
-        if overlap_end > overlap_start:
-            overlap_ms += overlap_end - overlap_start
-    return overlap_ms
 
 
 class AudioTrackWidget(QWidget):
@@ -614,7 +499,7 @@ class TimelinePage(QWidget):
         self._loading_segments = True
         self.segments_table.setRowCount(len(project.segments))
         for row_index, segment in enumerate(project.segments):
-            overlap_ms = _segment_overlap_ms(segment.start_ms, segment.end_ms, project.cut_suggestions)
+            overlap_ms = segment_overlap_ms(segment.start_ms, segment.end_ms, project.cut_suggestions)
             if overlap_ms >= segment.duration_ms and segment.duration_ms > 0:
                 state = "已删除"
             elif overlap_ms > 0:
@@ -1008,6 +893,18 @@ class TranslationPage(QWidget):
         self.test_translation_button.setEnabled(not running)
         self.translate_all_button.setText("翻译中..." if running else "翻译全部片段")
         self.translation_progress_bar.setVisible(running)
+        # Disable in-place editing while a translation task is running: partial
+        # results rebuild the table and would silently overwrite edits made in
+        # the meantime.
+        self.translation_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+            if running
+            else (
+                QAbstractItemView.EditTrigger.DoubleClicked
+                | QAbstractItemView.EditTrigger.EditKeyPressed
+                | QAbstractItemView.EditTrigger.SelectedClicked
+            )
+        )
         if not running:
             self.translation_progress_bar.setValue(0)
             self.translation_progress_bar.setFormat("等待开始")
@@ -1083,13 +980,14 @@ class DubbingPage(QWidget):
         self.rate_spin.setSingleStep(0.05)
         top_row.addWidget(self.rate_spin)
         top_row.addStretch(1)
-        self.apply_voice_button = QPushButton("仅应用音色")
+        # [已注释] 仅应用音色按钮：与“生成配音”的自动应用音色功能重叠，暂时移除。
+        # self.apply_voice_button = QPushButton("仅应用音色")
         self.generate_button = QPushButton("生成配音（自动应用当前音色）")
         self.preview_button = QPushButton("试听音色")
         self.stop_button = QPushButton("停止播放")
-        self.apply_voice_button.setToolTip("只修改片段音色，不立即生成配音。")
+        # self.apply_voice_button.setToolTip("只修改片段音色，不立即生成配音。")
         self.generate_button.setToolTip("先把当前音色应用到勾选/所选片段，再直接生成配音。")
-        top_row.addWidget(self.apply_voice_button)
+        # top_row.addWidget(self.apply_voice_button)
         top_row.addWidget(self.generate_button)
         top_row.addWidget(self.preview_button)
         top_row.addWidget(self.stop_button)
@@ -1236,7 +1134,7 @@ class DubbingPage(QWidget):
     def set_dubbing_running(self, running: bool) -> None:
         self.voice_combo.setEnabled(not running)
         self.rate_spin.setEnabled(not running)
-        self.apply_voice_button.setEnabled(not running)
+        # self.apply_voice_button.setEnabled(not running)
         self.generate_button.setEnabled(not running)
         self.preview_button.setEnabled(not running)
         self.check_selected_button.setEnabled(not running)

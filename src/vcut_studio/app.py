@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import sys
 
 from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
@@ -8,10 +9,13 @@ from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import QApplication
 
 from .context import AppContext
+from .logging_setup import configure_logging, install_excepthook
 from .project_store import ProjectStore
 from .runtime_assets import find_app_icon
 from .settings import SettingsStore
 from .ui.main_window import MainWindow
+
+logger = logging.getLogger(__name__)
 
 
 def _set_windows_app_id() -> None:
@@ -46,6 +50,11 @@ def _install_qt_translations(app: QApplication) -> None:
 
 def run() -> int:
     _set_windows_app_id()
+    context = create_context()
+    log_file_path = configure_logging(level=context.settings.workspace.log_level)
+    install_excepthook()
+    if log_file_path is not None:
+        logger.info("日志文件：%s", log_file_path)
     app = QApplication(sys.argv)
     _install_qt_translations(app)
     app.setStyle("Fusion")
@@ -70,7 +79,6 @@ def run() -> int:
     icon_path = find_app_icon()
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))
-    context = create_context()
     window = MainWindow(context)
     window.show()
     return app.exec()

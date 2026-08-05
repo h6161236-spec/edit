@@ -107,7 +107,7 @@ class ExportPlanningTests(unittest.TestCase):
         project.source_duration_ms = 5000
         project.media_info = MediaInfo(duration_ms=5000, has_video=True, has_audio=True)
         project.segments = [
-            Segment(segment_id="s1", start_ms=0, end_ms=2200, zh_text="涓€", en_text="One line"),
+            Segment(segment_id="s1", start_ms=0, end_ms=2200, zh_text="一", en_text="One line"),
         ]
         keep_ranges = keep_ranges_from_cuts(
             5000,
@@ -238,15 +238,22 @@ class ExportPlanningTests(unittest.TestCase):
             ),
         )
 
+    def _write_sample_wav(self, path: Path) -> None:
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(b"\x00\x00" * 1600)  # 0.1s of silence
+
     def test_can_reuse_segment_dub_matches_cached_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             audio_path = Path(tmp_dir) / "cached.wav"
-            audio_path.write_bytes(b"RIFFtest")
+            self._write_sample_wav(audio_path)
             segment = Segment(
                 segment_id="s1",
                 start_ms=0,
                 end_ms=1000,
-                zh_text="浣犲ソ",
+                zh_text="你好",
                 en_text="Hello",
                 dub_audio_path=str(audio_path),
                 dub_text="Hello",
@@ -258,6 +265,26 @@ class ExportPlanningTests(unittest.TestCase):
             self.assertEqual(reused, audio_path)
             self.assertIsNone(
                 can_reuse_segment_dub(segment, voice_id="emma_clear", rate=1.1, text="Hello")
+            )
+
+    def test_can_reuse_segment_dub_rejects_corrupted_cache_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_path = Path(tmp_dir) / "corrupted.wav"
+            audio_path.write_bytes(b"RIFFtest-not-a-real-wav")
+            segment = Segment(
+                segment_id="s1",
+                start_ms=0,
+                end_ms=1000,
+                zh_text="你好",
+                en_text="Hello",
+                dub_audio_path=str(audio_path),
+                dub_text="Hello",
+                dub_voice_id="emma_clear",
+                dub_rate=1.0,
+            )
+
+            self.assertIsNone(
+                can_reuse_segment_dub(segment, voice_id="emma_clear", rate=1.0, text="Hello")
             )
 
 
@@ -420,7 +447,7 @@ class ExportIntegrationTests(unittest.TestCase):
                     segment_id="s1",
                     start_ms=0,
                     end_ms=3000,
-                    zh_text="浣犲ソ",
+                    zh_text="你好",
                     en_text="Hello from VCut Studio.",
                     voice_id="emma_clear",
                 ),

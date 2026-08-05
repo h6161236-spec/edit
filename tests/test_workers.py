@@ -128,30 +128,57 @@ class TranslationWorkerRetryTests(unittest.TestCase):
         self.assertEqual(results[0][1].translated_text, "OK-seg1")
         self.assertEqual(results[1][1].translated_text, "OK-seg2")
 
-    def test_translation_worker_can_proofread_batch(self) -> None:
+    def test_translation_worker_parallel_path_keeps_stable_order(self) -> None:
+        import threading
+        import time
+        from unittest.mock import patch
+
         settings = AppSettings()
+        settings.translation.concurrency = 4
+        settings.translation.batch_size = 1
         worker = TranslationWorker(
             settings=settings,
-            row_requests=[(0, TranslationRequest(segment_id="seg1", source_text="泥好"))],
-            proofread_source=True,
+            row_requests=[
+                (i, TranslationRequest(segment_id=f"seg{i}", source_text=f"文本{i}"))
+                for i in range(6)
+            ],
         )
 
         class FakeProvider:
-            def proofread_segments(self, requests: list[TranslationRequest]) -> list[CorrectionResult]:
-                return [
-                    CorrectionResult(
-                        segment_id=requests[0].segment_id,
-                        corrected_text="你好",
-                    )
-                ]
+            def __init__(self) -> None:
+                self.active = 0
+                self.max_active = 0
+                self._lock = threading.Lock()
 
-        results = worker._proofread_batch_with_fallback(
-            FakeProvider(),
-            worker.row_requests,
-            "1/1",
-        )
+            def translate_segments(self, requests: list[TranslationRequest]) -> list[TranslationResult]:
+                with self._lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    time.sleep(0.05)
+                    return [
+                        TranslationResult(
+                            segment_id=requests[0].segment_id,
+                            translated_text="OK-" + requests[0].segment_id,
+                        )
+                    ]
+                finally:
+                    with self._lock:
+                        self.active -= 1
 
-        self.assertEqual(results[0][1].source_text, "你好")
+        provider = FakeProvider()
+        collected: list[object] = []
+        worker.finished.connect(collected.append)
+        with patch("vcut_studio.ui.workers.create_translation_provider", return_value=provider):
+            worker.run()
+
+        results = collected[0].items  # type: ignore[attr-defined]
+
+        # All six results present, in original row order.
+        self.assertEqual([item[0] for item in results], [0, 1, 2, 3, 4, 5])
+        self.assertEqual([item[1].translated_text for item in results], [f"OK-seg{i}" for i in range(6)])
+        # More than one batch really ran concurrently.
+        self.assertGreater(provider.max_active, 1)
 
 
 class SourceProofreadWorkerTests(unittest.TestCase):

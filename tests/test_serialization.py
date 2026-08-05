@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vcut_studio.models import CutSuggestion, MediaInfo, Project, Segment
-from vcut_studio.project_store import ProjectStore
+from vcut_studio.project_store import ProjectLoadError, ProjectStore
 from vcut_studio.settings import AppSettings, SettingsStore
 
 
@@ -151,6 +151,74 @@ class SettingsStoreTests(unittest.TestCase):
 
         self.assertEqual(loaded.export.subtitle_english_color, "#047BFF")
         self.assertEqual(loaded.export.subtitle_chinese_color, "#FFD966")
+
+    def test_settings_from_dict_tolerates_corrupted_values(self) -> None:
+        loaded = AppSettings.from_dict(
+            {
+                "asr": {
+                    "segment_max_seconds": "not-a-number",
+                    "min_confidence": None,
+                    "vad_enabled": "false",
+                },
+                "translation": {"timeout_sec": -5, "max_retries": "many"},
+                "tts": {"rate": "fast", "sample_rate": 0},
+                "export": {"audio_lufs_target": -200},
+            }
+        )
+
+        # Fallbacks keep sane defaults.
+        self.assertEqual(loaded.asr.segment_max_seconds, 25)
+        self.assertAlmostEqual(loaded.asr.min_confidence, 0.55)
+        # String "false" must not become True.
+        self.assertFalse(loaded.asr.vad_enabled)
+        # Values are clamped into valid ranges instead of crashing.
+        self.assertEqual(loaded.translation.timeout_sec, 1)
+        self.assertEqual(loaded.translation.max_retries, 3)
+        self.assertAlmostEqual(loaded.tts.rate, 1.0)
+        self.assertEqual(loaded.tts.sample_rate, 8000)
+        self.assertEqual(loaded.export.audio_lufs_target, -70)
+
+    def test_settings_store_load_tolerates_corrupted_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "settings.json"
+            path.write_text("{ this is not valid json", encoding="utf-8")
+            store = SettingsStore(path)
+            loaded = store.load()
+
+            # Falls back to defaults and rewrites a valid file.
+            self.assertEqual(loaded.asr.model_name, "small")
+            self.assertTrue(path.exists())
+            self.assertTrue(any(path.parent.glob("settings.json.corrupted.*")))
+
+    def test_settings_store_save_is_atomic_and_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "settings.json"
+            store = SettingsStore(path)
+            settings = AppSettings()
+            settings.asr.model_name = "medium"
+            store.save(settings)
+            loaded = store.load()
+
+        self.assertEqual(loaded.asr.model_name, "medium")
+        # No leftover temp files after a successful save.
+        self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
+    def test_project_store_load_reports_corrupted_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "broken.vcutproj"
+            path.write_text("{nope", encoding="utf-8")
+            store = ProjectStore()
+            with self.assertRaises(ProjectLoadError):
+                store.load(path)
+    def test_project_store_save_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "demo.vcutproj"
+            store = ProjectStore()
+            store.save(Project.new("Demo"), path)
+            loaded = store.load(path)
+
+            self.assertEqual(loaded.name, "Demo")
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

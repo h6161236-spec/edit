@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +13,7 @@ from uuid import uuid4
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..asr import FasterWhisperTranscriber, TranscriptionSummary
+from ..background import BackgroundTaskCancelled
 from ..exporting import (
     ExportPlan,
     export_clean_video,
@@ -28,13 +31,14 @@ from ..providers.translation import (
 from ..providers.tts import create_tts_provider
 from ..settings import ASRSettings, AppSettings
 
+logger = logging.getLogger(__name__)
+
 PROCESS_SUSPEND_RESUME = 0x0800
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_TERMINATE = 0x0001
 
 
-class BackgroundTaskCancelled(RuntimeError):
-    """Raised when the user stops the current background task."""
+__all__ = ["BackgroundTaskCancelled"]
 
 
 def _with_windows_process_handle(
@@ -196,6 +200,11 @@ class ControllableWorker(QObject):
                 self._attached_process = None
                 self._attached_process_suspended = False
 
+    def _fail(self, exc: Exception) -> None:
+        """Log the full traceback and emit a user-facing error message."""
+        logger.error("%s 任务失败：%s", self.task_label, exc, exc_info=exc)
+        self.error.emit(str(exc))
+
     def _raise_if_cancelled_locked(self) -> None:
         if self._cancel_requested:
             raise BackgroundTaskCancelled("已终止当前后台任务。")
@@ -224,8 +233,7 @@ class ControllableWorker(QObject):
 
 
 class AnalysisWorker(ControllableWorker):
-    progress = Signal(str)
-    progress_value = Signal(int, str)
+    progress = Signal(int, str)
     finished = Signal(object)
     error = Signal(str)
 
@@ -257,7 +265,7 @@ class AnalysisWorker(ControllableWorker):
             self.cancelled.emit(str(exc))
             return
         except Exception as exc:
-            self.error.emit(str(exc))
+            self._fail(exc)
             return
 
         self.finished.emit(
@@ -268,8 +276,7 @@ class AnalysisWorker(ControllableWorker):
         )
 
     def _emit_progress(self, value: int, message: str) -> None:
-        self.progress.emit(message)
-        self.progress_value.emit(value, message)
+        self.progress.emit(value, message)
 
 
 def _dub_output_dir(settings: AppSettings, project: object) -> Path:
@@ -298,8 +305,7 @@ def _export_task_label(export_type: str) -> str:
 
 
 class ExportWorker(ControllableWorker):
-    progress = Signal(str)
-    progress_value = Signal(int, str)
+    progress = Signal(int, str)
     finished = Signal(object)
     error = Signal(str)
 
@@ -369,18 +375,16 @@ class ExportWorker(ControllableWorker):
             self.cancelled.emit(str(exc))
             return
         except Exception as exc:
-            self.error.emit(str(exc))
+            self._fail(exc)
             return
         self.finished.emit(ExportResult(export_type=self.export_type, plan=plan))
 
     def _emit_progress(self, value: int, message: str) -> None:
-        self.progress.emit(message)
-        self.progress_value.emit(value, message)
+        self.progress.emit(value, message)
 
 
 class DubbingWorker(ControllableWorker):
-    progress = Signal(str)
-    progress_value = Signal(int, str)
+    progress = Signal(int, str)
     finished = Signal(object)
     error = Signal(str)
 
@@ -447,19 +451,17 @@ class DubbingWorker(ControllableWorker):
             self.cancelled.emit(str(exc))
             return
         except Exception as exc:
-            self.error.emit(str(exc))
+            self._fail(exc)
             return
 
         self.finished.emit(DubbingJobResult(items=generated_items))
 
     def _emit_progress(self, value: int, message: str) -> None:
-        self.progress.emit(message)
-        self.progress_value.emit(value, message)
+        self.progress.emit(value, message)
 
 
 class SourceProofreadWorker(ControllableWorker):
-    progress = Signal(str)
-    progress_value = Signal(int, str)
+    progress = Signal(int, str)
     partial_results = Signal(object)
     finished = Signal(int)
     error = Signal(str)
@@ -559,7 +561,7 @@ class SourceProofreadWorker(ControllableWorker):
             self.cancelled.emit(str(exc))
             return
         except Exception as exc:
-            self.error.emit(str(exc))
+            self._fail(exc)
             return
 
         self.finished.emit(corrected_count)
@@ -571,14 +573,11 @@ class SourceProofreadWorker(ControllableWorker):
         return 5 + int(normalized * 90)
 
     def _emit_progress(self, value: int, message: str) -> None:
-        self.progress.emit(message)
-        self.progress_value.emit(value, message)
+        self.progress.emit(value, message)
 
 
 class TranslationWorker(ControllableWorker):
-    progress = Signal(str)
-    progress_value = Signal(int, str)
-    source_corrected = Signal(object)
+    progress = Signal(int, str)
     partial_results = Signal(object)
     finished = Signal(object)
     error = Signal(str)
@@ -587,13 +586,10 @@ class TranslationWorker(ControllableWorker):
         self,
         settings: AppSettings,
         row_requests: list[tuple[int, TranslationRequest]],
-        *,
-        proofread_source: bool = False,
     ) -> None:
         super().__init__("英文翻译")
         self.settings = settings
         self.row_requests = row_requests
-        self.proofread_source = proofread_source
 
     def _is_timeout_error(self, exc: Exception) -> bool:
         message = str(exc).strip().lower()
@@ -615,6 +611,10 @@ class TranslationWorker(ControllableWorker):
                     split_index = max(1, len(batch) // 2)
                     left_batch = batch[:split_index]
                     right_batch = batch[split_index:]
+                    # Re-check cancellation before emitting: in the parallel
+                    # path the executor threads may outlive the cancelled main
+                    # loop, and emitting from a deleted worker would crash.
+                    self.checkpoint()
                     self._emit_progress(
                         5,
                         f"第 {batch_label} 批翻译超时，正在自动拆分重试（{len(batch)} -> {len(left_batch)} + {len(right_batch)}）..."
@@ -639,55 +639,6 @@ class TranslationWorker(ControllableWorker):
             translated_items.append((row_index, result_item))
         return translated_items
 
-    def _proofread_batch_with_fallback(
-        self,
-        provider: object,
-        batch: list[tuple[int, TranslationRequest]],
-        batch_label: str,
-    ) -> list[tuple[int, TranslationRequest]]:
-        self.checkpoint()
-        request_items = [request_item for _, request_item in batch]
-        try:
-            results = provider.proofread_segments(request_items)
-        except TranslationProviderError as exc:
-            if self._is_timeout_error(exc):
-                if len(batch) > 1:
-                    split_index = max(1, len(batch) // 2)
-                    left_batch = batch[:split_index]
-                    right_batch = batch[split_index:]
-                    self._emit_progress(
-                        5,
-                        f"第 {batch_label} 批文稿校正超时，正在自动拆分重试（{len(batch)} -> {len(left_batch)} + {len(right_batch)}）...",
-                    )
-                    left_results = self._proofread_batch_with_fallback(provider, left_batch, batch_label + ".1")
-                    right_results = self._proofread_batch_with_fallback(provider, right_batch, batch_label + ".2")
-                    return left_results + right_results
-                raise TranslationProviderError(
-                    str(exc) + " 当前单条分段校正也超时了，请增大“超时（秒）”或稍后重试。"
-                ) from exc
-            raise
-
-        self.checkpoint()
-        results_by_id = {item.segment_id: item for item in results}
-        corrected_items: list[tuple[int, TranslationRequest]] = []
-        for row_index, request_item in batch:
-            result_item = results_by_id.get(request_item.segment_id)
-            if result_item is None:
-                raise TranslationProviderError(
-                    f"文稿校正结果中缺少分段 {request_item.segment_id}。"
-                )
-            corrected_text = result_item.corrected_text.strip() or request_item.source_text
-            corrected_items.append(
-                (
-                    row_index,
-                    TranslationRequest(
-                        segment_id=request_item.segment_id,
-                        source_text=corrected_text,
-                    ),
-                )
-            )
-        return corrected_items
-
     @Slot()
     def run(self) -> None:
         try:
@@ -696,60 +647,73 @@ class TranslationWorker(ControllableWorker):
             working_requests = list(self.row_requests)
             translated_items: list[tuple[int, TranslationResult]] = []
 
-            if self.proofread_source:
-                corrected_requests: list[tuple[int, TranslationRequest]] = []
-                total_correction_batches = (len(working_requests) + batch_size - 1) // batch_size
-                for batch_start in range(0, len(working_requests), batch_size):
+            total_translation_batches = (len(working_requests) + batch_size - 1) // batch_size
+            translation_start = 5
+            batches = [
+                working_requests[batch_start : batch_start + batch_size]
+                for batch_start in range(0, len(working_requests), batch_size)
+            ]
+            concurrency = max(1, int(self.settings.translation.concurrency))
+            if concurrency <= 1 or len(batches) <= 1:
+                # Serial path: translate one batch at a time.
+                for batch_number, batch in enumerate(batches, start=1):
                     self.checkpoint()
-                    batch = working_requests[batch_start : batch_start + batch_size]
-                    batch_number = batch_start // batch_size + 1
+                    request_items = [request_item for _, request_item in batch]
                     self._emit_progress(
-                        self._progress_for_range(batch_number - 1, total_correction_batches, 5, 42),
-                        f"正在校正文稿第 {batch_number}/{total_correction_batches} 批（{len(batch)} 个分段）...",
+                        self._progress_for_range(batch_number - 1, total_translation_batches, translation_start, 95),
+                        f"正在翻译第 {batch_number}/{total_translation_batches} 批（{len(request_items)} 个分段）...",
                     )
-                    corrected_batch = self._proofread_batch_with_fallback(
+                    translated_batch = self._translate_batch_with_fallback(
                         provider,
                         batch,
-                        f"{batch_number}/{total_correction_batches}",
+                        f"{batch_number}/{total_translation_batches}",
                     )
-                    corrected_requests.extend(corrected_batch)
-                    self.source_corrected.emit(
-                        [(row_index, request_item.source_text) for row_index, request_item in corrected_batch]
-                    )
+                    translated_items.extend(translated_batch)
+                    self.partial_results.emit(translated_batch)
                     self._emit_progress(
-                        self._progress_for_range(batch_number, total_correction_batches, 5, 42),
-                        f"已完成 {batch_number}/{total_correction_batches} 批文稿校正。",
+                        self._progress_for_range(batch_number, total_translation_batches, translation_start, 95),
+                        f"已完成 {batch_number}/{total_translation_batches} 批翻译。",
                     )
-                working_requests = corrected_requests
-
-            total_translation_batches = (len(working_requests) + batch_size - 1) // batch_size
-            translation_start = 48 if self.proofread_source else 5
-            for batch_start in range(0, len(working_requests), batch_size):
-                self.checkpoint()
-                batch = working_requests[batch_start : batch_start + batch_size]
-                request_items = [request_item for _, request_item in batch]
-                batch_number = batch_start // batch_size + 1
-                self._emit_progress(
-                    self._progress_for_range(batch_number - 1, total_translation_batches, translation_start, 95),
-                    f"正在翻译第 {batch_number}/{total_translation_batches} 批（{len(request_items)} 个分段）..."
-                )
-                translated_batch = self._translate_batch_with_fallback(
-                    provider,
-                    batch,
-                    f"{batch_number}/{total_translation_batches}",
-                )
-                translated_items.extend(translated_batch)
-                self.partial_results.emit(translated_batch)
-                self._emit_progress(
-                    self._progress_for_range(batch_number, total_translation_batches, translation_start, 95),
-                    f"已完成 {batch_number}/{total_translation_batches} 批翻译。",
-                )
+            else:
+                # Parallel path: translate up to `concurrency` batches at once.
+                # Results are emitted as they finish, then re-ordered by batch
+                # index so the final result keeps a stable order.
+                completed_batches = 0
+                future_batch_pairs = {
+                    self._executor.submit(
+                        self._translate_batch_with_fallback,
+                        provider,
+                        batch,
+                        f"{batch_index + 1}/{total_translation_batches}",
+                    ): (batch_index, batch)
+                    for batch_index, batch in enumerate(batches)
+                }
+                translated_by_index: dict[int, list[tuple[int, TranslationResult]]] = {}
+                for future in as_completed(future_batch_pairs):
+                    self.checkpoint()
+                    batch_index, _batch = future_batch_pairs[future]
+                    translated_batch = future.result()
+                    translated_by_index[batch_index] = translated_batch
+                    completed_batches += 1
+                    self.partial_results.emit(translated_batch)
+                    self._emit_progress(
+                        self._progress_for_range(completed_batches, total_translation_batches, translation_start, 95),
+                        f"已完成 {completed_batches}/{total_translation_batches} 批翻译。",
+                    )
+                translated_items = [
+                    item
+                    for batch_index in sorted(translated_by_index)
+                    for item in translated_by_index[batch_index]
+                ]
+            self._shutdown_batch_executor()
             self._emit_progress(100, "翻译完成。")
         except BackgroundTaskCancelled as exc:
+            self._shutdown_batch_executor()
             self.cancelled.emit(str(exc))
             return
         except Exception as exc:
-            self.error.emit(str(exc))
+            self._shutdown_batch_executor()
+            self._fail(exc)
             return
 
         self.finished.emit(TranslationJobResult(items=translated_items))
@@ -767,12 +731,27 @@ class TranslationWorker(ControllableWorker):
         return start_value + int(normalized * max(0, end_value - start_value))
 
     def _emit_progress(self, value: int, message: str) -> None:
-        self.progress.emit(message)
-        self.progress_value.emit(value, message)
+        self.progress.emit(value, message)
+
+    @property
+    def _executor(self) -> ThreadPoolExecutor:
+        """Lazily-created executor for parallel batch translation."""
+        if getattr(self, "_batch_executor", None) is None:
+            self._batch_executor = ThreadPoolExecutor(
+                max_workers=max(1, int(self.settings.translation.concurrency)),
+                thread_name_prefix="vcut-translate",
+            )
+        return self._batch_executor
+
+    def _shutdown_batch_executor(self) -> None:
+        executor = getattr(self, "_batch_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._batch_executor = None
 
 
 class VoicePreviewWorker(ControllableWorker):
-    progress = Signal(str)
+    progress = Signal(int, str)
     finished = Signal(object)
     error = Signal(str)
 
@@ -799,15 +778,18 @@ class VoicePreviewWorker(ControllableWorker):
             sample_text = self.preview_text.strip() or self.settings.tts.preview_text.strip()
             if not sample_text:
                 sample_text = "Welcome to VCut Studio. This is a voice preview."
-            self.progress.emit("正在生成音色试听...")
+            self.progress.emit(0, "正在生成音色试听...")
             provider.synthesize_segment(
                 sample_text,
                 self.voice_id,
                 output_path,
                 controller=self,
             )
+        except BackgroundTaskCancelled as exc:
+            self.cancelled.emit(str(exc))
+            return
         except Exception as exc:
-            self.error.emit(str(exc))
+            self._fail(exc)
             return
 
         self.finished.emit(
@@ -819,7 +801,7 @@ class VoicePreviewWorker(ControllableWorker):
 
 
 class TranslationTestWorker(ControllableWorker):
-    progress = Signal(str)
+    progress = Signal(int, str)
     finished = Signal(str)
     error = Signal(str)
 
@@ -830,10 +812,10 @@ class TranslationTestWorker(ControllableWorker):
     @Slot()
     def run(self) -> None:
         try:
-            self.progress.emit("正在测试翻译提供方连接...")
+            self.progress.emit(0, "正在测试翻译提供方连接...")
             provider = create_translation_provider(self.settings.translation)
             sample = provider.test_connection()
         except Exception as exc:
-            self.error.emit(str(exc))
+            self._fail(exc)
             return
         self.finished.emit(sample)

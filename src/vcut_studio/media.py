@@ -206,15 +206,19 @@ def build_preview_proxy_media(
             command.append("-an")
 
     command.extend(["-movflags", "+faststart", str(preview_path)])
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        **subprocess_windowless_kwargs(),
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=3600,
+            **subprocess_windowless_kwargs(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MediaProbeError("准备视频监看预览副本超时（超过 1 小时）。") from exc
     if completed.returncode != 0 or not preview_path.exists():
         stderr_text = (completed.stderr or completed.stdout or "").strip()
         raise MediaProbeError(stderr_text or "准备视频监看预览副本失败。")
@@ -287,15 +291,19 @@ def parse_media_info_from_ffmpeg(stderr_text: str) -> MediaInfo:
 
 def probe_media_with_ffmpeg(media_path: Path, ffmpeg_path: str) -> ProbeResult:
     command = [resolve_ffmpeg_path(ffmpeg_path) or ffmpeg_path, "-hide_banner", "-i", str(media_path)]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        **subprocess_windowless_kwargs(),
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=30,
+            **subprocess_windowless_kwargs(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MediaProbeError(f"媒体探测超时（超过 30 秒）：{media_path}") from exc
     output_text = completed.stderr or completed.stdout
     if not output_text.strip():
         raise MediaProbeError("ffmpeg did not return any media information.")
@@ -322,15 +330,19 @@ def probe_media(media_path: str | Path, ffmpeg_path: str = "ffmpeg") -> ProbeRes
         "json",
         str(media_file),
     ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        **subprocess_windowless_kwargs(),
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=30,
+            **subprocess_windowless_kwargs(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MediaProbeError(f"媒体探测超时（超过 30 秒）：{media_file}") from exc
     if completed.returncode != 0:
         return probe_media_with_ffmpeg(media_file, ffmpeg_path)
 
@@ -387,12 +399,16 @@ def extract_audio_waveform(
         "pcm_s16le",
         "-",
     ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        check=False,
-        **subprocess_windowless_kwargs(),
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            timeout=600,
+            **subprocess_windowless_kwargs(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MediaProbeError("提取音轨波形超时（超过 10 分钟）。") from exc
     if completed.returncode != 0:
         stderr_text = completed.stderr.decode("utf-8", errors="replace")
         raise MediaProbeError(stderr_text.strip() or "无法提取音轨波形。")

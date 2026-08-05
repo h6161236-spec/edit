@@ -249,3 +249,37 @@ class ASRConversionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WhisperModelCacheTests(unittest.TestCase):
+    def test_cached_whisper_model_reuses_instance_across_calls(self) -> None:
+        from vcut_studio.asr import _MODEL_CACHE, _MODEL_CACHE_LOCK, _cached_whisper_model
+
+        created: list[object] = []
+
+        def fake_factory(*args: object, **kwargs: object) -> object:
+            instance = object()
+            created.append(instance)
+            return instance
+
+        with _MODEL_CACHE_LOCK:
+            _MODEL_CACHE.clear()
+        try:
+            first = _cached_whisper_model(
+                fake_factory, "small", "cpu", "int8", None, False
+            )
+            second = _cached_whisper_model(
+                fake_factory, "small", "cpu", "int8", None, False
+            )
+            self.assertIs(first, second)
+            self.assertEqual(len(created), 1)
+
+            # Different device/compute-type keys load a separate instance.
+            third = _cached_whisper_model(
+                fake_factory, "small", "cuda", "float16", None, False
+            )
+            self.assertIsNot(first, third)
+            self.assertEqual(len(created), 2)
+        finally:
+            with _MODEL_CACHE_LOCK:
+                _MODEL_CACHE.clear()

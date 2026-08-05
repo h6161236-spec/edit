@@ -15,6 +15,16 @@ from vcut_studio.ui.dubbing_logic import (
 
 
 class DubbingLogicTests(unittest.TestCase):
+    @staticmethod
+    def _write_sample_wav(path: Path) -> None:
+        import wave
+
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(b"\x00\x00" * 1600)  # 0.1s of silence
+
     def test_dub_review_status_returns_reusable_for_matching_cache(self) -> None:
         settings = AppSettings()
         settings.tts.default_voice = "emma_clear"
@@ -22,7 +32,7 @@ class DubbingLogicTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             audio_path = Path(tmp_dir) / "cached.wav"
-            audio_path.write_bytes(b"RIFFtest")
+            self._write_sample_wav(audio_path)
             segment = Segment(
                 segment_id="seg-001",
                 start_ms=0,
@@ -80,7 +90,7 @@ class DubbingLogicTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             audio_path = Path(tmp_dir) / "cached.wav"
-            audio_path.write_bytes(b"RIFFtest")
+            self._write_sample_wav(audio_path)
             project.segments[0].dub_audio_path = str(audio_path)
             project.segments[0].dub_text = "Ready"
             project.segments[0].dub_voice_id = "emma_clear"
