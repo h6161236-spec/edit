@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VCut Studio - 当前设计</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, "Microsoft YaHei UI", "Segoe UI", sans-serif;
+            background: #161a1f;
+            color: #e5e7eb;
+            padding: 20px;
+        }
+        .window {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: #161a1f;
+            border: 1px solid #2c3440;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .titlebar {
+            background: #11151b;
+            padding: 12px 16px;
+            border-bottom: 1px solid #2c3440;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .menu {
+            display: flex;
+            gap: 16px;
+            font-size: 14px;
+        }
+        .tabs {
+            background: #1c222b;
+            display: flex;
+            gap: 4px;
+            padding: 8px 12px;
+            border-bottom: 1px solid #2c3440;
+        }
+        .tab {
+            background: #11151b;
+            border: 1px solid #2c3440;
+            border-bottom: none;
+            border-radius: 8px 8px 0 0;
+            padding: 8px 20px;
+            color: #cbd5e1;
+            cursor: pointer;
+        }
+        .tab.active {
+            background: #1c222b;
+            color: #f8fafc;
+        }
+        .content {
+            padding: 16px;
+        }
+        .group {
+            border: 1px solid #2c3440;
+            border-radius: 10px;
+            margin-bottom: 16px;
+            background: #1c222b;
+            padding: 16px;
+        }
+        .group-title {
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #f8fafc;
+        }
+        .video-preview {
+            background: linear-gradient(to bottom, #121a22, #0a1016);
+            border: 1px solid #273442;
+            border-radius: 10px;
+            height: 360px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #64748b;
+            margin-bottom: 12px;
+        }
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        button {
+            background: #273445;
+            border: 1px solid #344255;
+            border-radius: 8px;
+            padding: 8px 16px;
+            color: #f8fafc;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background: #304259;
+        }
+        .waveform {
+            background: linear-gradient(to bottom, #f8fafc, #e8eef5);
+            border: 1px solid #cbd5e1;
+            border-radius: 10px;
+            height: 120px;
+            margin-bottom: 16px;
+            position: relative;
+            overflow: hidden;
+        }
+        .waveform-content {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #64748b;
+            font-size: 13px;
+        }
+        table {
+            width: 100%;
+            background: #11151b;
+            border: 1px solid #2f3946;
+            border-collapse: collapse;
+        }
+        th {
+            background: #202734;
+            padding: 10px;
+            text-align: left;
+            font-size: 13px;
+            font-weight: 600;
+            color: #e5e7eb;
+        }
+        td {
+            padding: 10px;
+            border-top: 1px solid #27313d;
+            font-size: 13px;
+        }
+        tr:hover {
+            background: #18202a;
+        }
+        .statusbar {
+            background: #11151b;
+            border-top: 1px solid #2c3440;
+            padding: 8px 16px;
+            font-size: 13px;
+            color: #94a3b8;
+        }
+    </style>
+</head>
+<body>
+    <div class="window">
+        <div class="titlebar">
+            <div class="menu">
+                <span>文件</span>
+                <span>工具</span>
+            </div>
+            <div style="color: #94a3b8;">VCut Studio</div>
+        </div>
+
+        <div class="tabs">
+            <div class="tab active">识别</div>
+            <div class="tab">建议删除</div>
+            <div class="tab">翻译</div>
+            <div class="tab">配音</div>
+        </div>
+
+        <div class="content">
+            <div class="group">
+                <div class="group-title">视频监看与音轨</div>
+                <div class="video-preview">
+                    视频预览区域
+                </div>
+                <div class="controls">
+                    <button>播放</button>
+                    <button>停止</button>
+                    <button>静音</button>
+                </div>
+                <div class="waveform">
+                    <div class="waveform-content">音轨波形</div>
+                </div>
+            </div>
+
+            <div class="group">
+                <div class="group-title">识别分段（翻译路线）</div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>状态</th>
+                            <th>开始</th>
+                            <th>结束</th>
+                            <th>中文</th>
+                            <th>英文</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>保留</td>
+                            <td>00:00:00.000</td>
+                            <td>00:00:03.500</td>
+                            <td>大家好，欢迎来到这期视频</td>
+                            <td>Hello everyone, welcome to this video</td>
+                        </tr>
+                        <tr>
+                            <td>保留</td>
+                            <td>00:00:03.500</td>
+                            <td>00:00:07.200</td>
+                            <td>今天我要给大家介绍一个很有趣的话题</td>
+                            <td>Today I want to introduce an interesting topic</td>
+                        </tr>
+                        <tr>
+                            <td>已裁剪 200ms</td>
+                            <td>00:00:07.200</td>
+                            <td>00:00:10.800</td>
+                            <td>那就是关于视频剪辑的技巧</td>
+                            <td>It's about video editing techniques</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="statusbar">
+            后台任务：空闲
+        </div>
+    </div>
+</body>
+</html>
